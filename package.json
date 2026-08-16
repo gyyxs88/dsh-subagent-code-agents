@@ -1,0 +1,80 @@
+{
+  "name": "dsh-subagent-code-agents",
+  "version": "0.1.0",
+  "description": "Multi-channel coding-agent subagent plugin for DeepSeek Harness: Codex, Claude Code and Grok Build behind one Cordis plugin (npm workspaces monorepo, root-installable)",
+  "type": "module",
+  "main": "packages/plugin/lib/index.js",
+  "types": "packages/plugin/lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./packages/plugin/lib/index.d.ts",
+      "default": "./packages/plugin/lib/index.js"
+    },
+    "./tool": {
+      "types": "./packages/plugin/lib/tool.d.ts",
+      "default": "./packages/plugin/lib/tool.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./packages/plugin/cordis.patch.yml"
+    }
+  },
+  "workspaces": [
+    "packages/core",
+    "packages/channel-codex",
+    "packages/channel-claude-code",
+    "packages/channel-grok-build",
+    "packages/plugin"
+  ],
+  "scripts": {
+    "test": "node --test --test-isolation=none packages/*/test/*.test.js",
+    "test:core": "node --test --test-isolation=none packages/core/test/*.test.js",
+    "test:codex": "node --test --test-isolation=none packages/channel-codex/test/*.test.js",
+    "test:claude": "node --test --test-isolation=none packages/channel-claude-code/test/*.test.js",
+    "test:grok": "node --test --test-isolation=none packages/channel-grok-build/test/*.test.js",
+    "test:plugin": "node --test --test-isolation=none packages/plugin/test/*.test.js",
+    "check": "node scripts/check.js",
+    "pack:check": "node scripts/pack-check.js"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "files": [
+    "packages/plugin/lib",
+    "packages/plugin/cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "dependencies": {
+    "@dsh-subagent-code-agents/core": "0.1.0",
+    "@dsh-subagent-code-agents/channel-codex": "0.1.0",
+    "@dsh-subagent-code-agents/channel-claude-code": "0.1.0",
+    "@dsh-subagent-code-agents/channel-grok-build": "0.1.0",
+    "@dsh-subagent-code-agents/plugin": "0.1.0",
+    "@deepseek-ai/schemastery": "^3.18.1"
+  },
+  "bundleDependencies": [
+    "@dsh-subagent-code-agents/core",
+    "@dsh-subagent-code-agents/channel-codex",
+    "@dsh-subagent-code-agents/channel-claude-code",
+    "@dsh-subagent-code-agents/channel-grok-build",
+    "@dsh-subagent-code-agents/plugin"
+  ],
+  "peerDependencies": {
+    "@deepseek-ai/cordis": ">=4.0.1",
+    "@deepseek-ai/dsh-subagent": ">=0.1.0-rc.6",
+    "@deepseek-ai/dsh-tools": ">=0.1.0-rc.6"
+  },
+  "license": "MIT",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "cordis",
+    "subagent",
+    "codex",
+    "claude-code",
+    "grok-build"
+  ]
+}

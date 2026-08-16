@@ -1,0 +1,42 @@
+{
+  "name": "@dsh-subagent-code-agents/channel-codex",
+  "version": "0.1.0",
+  "description": "Codex channel adapter: runs OpenAI Codex CLI behind the multi-channel coding-agent core (no DSH/Cordis dependency)",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./app-server": {
+      "types": "./lib/app-server-channel.d.ts",
+      "default": "./lib/app-server-channel.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/index.d.ts",
+    "lib/app-server-channel.js",
+    "lib/app-server-channel.d.ts",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test --test-isolation=none"
+  },
+  "dependencies": {
+    "@dsh-subagent-code-agents/core": "0.1.0"
+  },
+  "license": "MIT",
+  "keywords": [
+    "codex",
+    "openai",
+    "subagent",
+    "channel"
+  ],
+  "engines": {
+    "node": ">=24"
+  }
+}

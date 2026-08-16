@@ -1,0 +1,37 @@
+{
+  "name": "@dsh-subagent-code-agents/channel-claude-code",
+  "version": "0.1.0",
+  "description": "Claude Code channel adapter: runs Anthropic Claude Code CLI headless behind the multi-channel coding-agent core (no DSH/Cordis dependency)",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/index.d.ts",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test --test-isolation=none"
+  },
+  "dependencies": {
+    "@dsh-subagent-code-agents/core": "0.1.0"
+  },
+  "license": "MIT",
+  "keywords": [
+    "claude",
+    "claude-code",
+    "anthropic",
+    "subagent",
+    "channel"
+  ],
+  "engines": {
+    "node": ">=24"
+  }
+}

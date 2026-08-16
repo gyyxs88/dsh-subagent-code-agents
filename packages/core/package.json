@@ -1,0 +1,36 @@
+{
+  "name": "@dsh-subagent-code-agents/core",
+  "version": "0.1.0",
+  "description": "Multi-channel coding-agent subagent core: channel adapter interface, registry, unified results, runtime injection",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/index.d.ts",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test --test-isolation=none"
+  },
+  "license": "MIT",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "subagent",
+    "channel",
+    "codex",
+    "claude-code",
+    "grok-build"
+  ],
+  "engines": {
+    "node": ">=24"
+  }
+}

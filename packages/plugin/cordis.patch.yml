@@ -1,0 +1,40 @@
+# dsh-subagent-code-agents bundle patch.
+#
+# Applied when this package is listed in your profile's `dsh.profile.bundles`.
+# Registers three subagent providers on the HOST plane (the `subagents`
+# registry is a process singleton; providers must register here, never in an
+# agent preset):
+#
+#   coding-agent/codex        — OpenAI Codex CLI
+#   coding-agent/claude-code  — Anthropic Claude Code CLI
+#   coding-agent/grok-build   — Grok Build CLI
+#
+# Provider names carry the `coding-agent/` prefix so they coexist with the
+# legacy `dsh-subagent-codex` plugin (which registers plain `codex`) — both can
+# be loaded side by side.
+#
+# TOOLS: the `subagent_code` / `coding_sessions_*` tools are contributed by the
+# agent-preset entry `dsh-subagent-code-agents/tool` (lib/tool.js). A host
+# bundle patch cannot safely edit every preset, so enable it per preset by
+# adding a tool row inside your preset's agent.cordis.yml, delegation group:
+#
+#   - id: tool-subagent-code-agents
+#     name: 'dsh-subagent-code-agents/tool'
+#
+# The providers below are inert without that tool row.
+- insert:
+    - id: coding-agent-codex
+      name: 'dsh-subagent-code-agents'
+      config:
+        channel: codex
+        providerName: coding-agent/codex
+    - id: coding-agent-claude-code
+      name: 'dsh-subagent-code-agents'
+      config:
+        channel: claude-code
+        providerName: coding-agent/claude-code
+    - id: coding-agent-grok-build
+      name: 'dsh-subagent-code-agents'
+      config:
+        channel: grok-build
+        providerName: coding-agent/grok-build
