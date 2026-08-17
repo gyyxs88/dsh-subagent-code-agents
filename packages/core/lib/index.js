@@ -51,6 +51,13 @@
  */
 
 /**
+ * Best-effort observation emitted while a channel run is active. The final
+ * ChannelResult remains authoritative; updates never mutate the parent model
+ * context and may be coalesced by an embedding transport.
+ * @typedef {{ type: 'text-delta', text: string }} ChannelUpdate
+ */
+
+/**
  * Per-channel adapter interface. Implementations must be pure adapters: they
  * receive `RuntimeEnv` at construction and must NOT depend on DSH/Cordis.
  *
@@ -83,6 +90,7 @@
  *   path: typeof import('node:path'),
  *   logger: { info: Function, warn: Function, error: Function },
  *   signal?: AbortSignal,
+ *   onUpdate?: (update: ChannelUpdate) => void,
  *   cwd?: string,
  *   tmpdir?: string,
  * }} RuntimeEnv

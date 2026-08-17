@@ -239,6 +239,8 @@ function fakeHandle({ script, exitCode = 0, stderrText = '' }) {
 
 test('run parses thread.started + agent_message and returns sessionId + completed', async () => {
   const env = makeEnv()
+  const updates = []
+  env.onUpdate = (update) => updates.push(update)
   let spawned
   env.subprocess.spawn = (spec) => {
     spawned = spec
@@ -256,6 +258,7 @@ test('run parses thread.started + agent_message and returns sessionId + complete
   assert.equal(result.output, 'hello')
   assert.equal(result.sessionId, 'thr_1')
   assert.equal(result.channel, 'codex')
+  assert.deepEqual(updates.map((update) => update.text), ['hello'])
   assert.ok(spawned.argv.includes(BYPASS))
 })
 

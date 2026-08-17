@@ -34,6 +34,11 @@ export interface ChannelResult {
   capabilities: ChannelCapabilities
 }
 
+export interface ChannelUpdate {
+  type: 'text-delta'
+  text: string
+}
+
 export interface RunEnv {
   subprocess: {
     spawn(spec: object): object
@@ -43,6 +48,8 @@ export interface RunEnv {
   path: typeof import('node:path')
   logger: { info: (...args: unknown[]) => void; warn: (...args: unknown[]) => void; error: (...args: unknown[]) => void }
   signal?: AbortSignal
+  /** Best-effort observation only; ChannelResult remains the authoritative final value. */
+  onUpdate?: (update: ChannelUpdate) => void
   cwd?: string
   /** Temp directory override (channels default to os.tmpdir()). */
   tmpdir?: string

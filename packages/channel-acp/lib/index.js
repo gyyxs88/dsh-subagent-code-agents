@@ -2,18 +2,23 @@
  * Generic Agent Client Protocol (ACP) channel.
  *
  * Each configured instance owns a stable `acp/<name>` channel id and launches
- * one ACP agent process per call over newline-delimited JSON-RPC 2.0. The
- * adapter deliberately advertises only the stable v1 operations it uses:
- * initialize, session/new or session/load, session/prompt and session/cancel.
+ * ACP agent processes over newline-delimited JSON-RPC 2.0. It implements the
+ * stable v1 baseline plus runtime-negotiated session/list, load replay,
+ * session/resume, session/close and session config options. Optional methods
+ * return explicit unsupported when the configured agent omits its capability.
  */
 
 import { StringDecoder } from 'node:string_decoder'
-import { emptyCapabilities, registry, tryRegister } from '@dsh-subagent-code-agents/core'
+import { emptyCapabilities, registry, tryRegister, unsupported } from '@dsh-subagent-code-agents/core'
 
 const PREFIX = 'channel-acp'
-const DEFAULT_REQUEST_TIMEOUT_MS = 30_000
+const DEFAULT_REQUEST_TIMEOUT_MS = 10 * 60_000
 const MAX_LINE_BUFFER_BYTES = 4 * 1024 * 1024
 const MAX_PENDING_REQUESTS = 128
+const MAX_HISTORY_CHARS = 12_000
+const MAX_HISTORY_TURNS = 20
+const MAX_SESSION_PAGES = 100
+const TRUNC_MARKER = '…[truncated]'
 const CHANNEL_NAME_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/u
 
 export class AcpProtocolError extends Error {
@@ -84,9 +89,15 @@ function acpCapabilities() {
     ...emptyCapabilities(),
     run: true,
     resume: true,
+    listSessions: true,
+    readSession: true,
+    managedSession: true,
+    cancel: true,
     streaming: false,
-    modelOverride: false,
-    effortOverride: false,
+    // These are negotiated per session through configOptions. The methods are
+    // available, but return explicit unsupported when the agent omits them.
+    modelOverride: true,
+    effortOverride: true,
     sandboxBypassGuaranteed: false,
   }
 }
@@ -113,7 +124,7 @@ async function resolveCommand(env, command, commandEnv) {
   return resolved
 }
 
-class AcpClient {
+export class AcpClient {
   constructor({ handle, requestTimeoutMs, logger }) {
     if (!handle?.stdin || !handle?.stdout || typeof handle.done?.then !== 'function') {
       throw new AcpProtocolError(-32000, 'ACP spawn returned an invalid process handle')
@@ -258,6 +269,148 @@ class AcpClient {
   }
 }
 
+async function openAcpConnection({ options, env, signal }) {
+  const executable = await resolveCommand(env, options.command, options.env)
+  const handle = env.subprocess.spawn({
+    argv: [executable, ...options.args],
+    cwd: options.cwd ?? env.cwd,
+    ...(options.env === undefined ? {} : { env: options.env }),
+    stdio: {
+      stdin: 'pipe',
+      stdout: 'pipe',
+      stderr: { maxBytes: 65536 },
+    },
+    graceMs: 2000,
+    ...(signal === undefined ? {} : { signal }),
+  })
+  const client = new AcpClient({
+    handle,
+    requestTimeoutMs: options.requestTimeoutMs,
+    logger: env.logger,
+  })
+  let initialized
+  try {
+    initialized = await client.request('initialize', {
+      protocolVersion: 1,
+      clientCapabilities: {
+        fs: { readTextFile: false, writeTextFile: false },
+        terminal: false,
+        session: { configOptions: { boolean: {} } },
+      },
+      clientInfo: { name: 'dsh-subagent-code-agents', version: '0.1.0' },
+    })
+    if (initialized?.protocolVersion !== undefined && initialized.protocolVersion !== 1) {
+      throw new AcpProtocolError(-32002, `ACP agent selected unsupported protocol version ${initialized.protocolVersion}`)
+    }
+  } catch (error) {
+    await client.dispose().catch(() => {})
+    throw error
+  }
+  return { client, handle, initialized }
+}
+
+function configOptionFor(configOptions, capability) {
+  if (!Array.isArray(configOptions)) return undefined
+  if (capability === 'modelOverride') {
+    return configOptions.find((option) => option?.category === 'model' && option.type === 'select')
+  }
+  return configOptions.find((option) =>
+    option?.type === 'select' && (
+      option.category === 'thought_level' ||
+      (option.category === 'model_config' && /(?:effort|reason|thought)/iu.test(`${option.id ?? ''} ${option.name ?? ''}`))
+    ),
+  )
+}
+
+async function applyConfigOverrides({ client, sessionId, configOptions, request }) {
+  let current = Array.isArray(configOptions) ? configOptions : []
+  for (const [capability, requested] of [
+    ['modelOverride', request.model],
+    ['effortOverride', request.reasoningEffort],
+  ]) {
+    if (requested === undefined) continue
+    if (typeof requested !== 'string' || requested.trim() === '') {
+      return { ok: false, capability, message: `${capability} must be a non-empty string` }
+    }
+    const value = requested.trim()
+    const option = configOptionFor(current, capability)
+    if (option === undefined) {
+      return { ok: false, capability, message: `ACP agent does not advertise a ${capability} config option` }
+    }
+    const choices = Array.isArray(option.options) ? option.options : []
+    if (!choices.some((choice) => choice?.value === value)) {
+      return { ok: false, capability, message: `ACP agent does not offer ${capability} value "${value}"` }
+    }
+    if (option.currentValue === value) continue
+    const updated = await client.request('session/set_config_option', {
+      sessionId,
+      configId: option.id,
+      value,
+    })
+    current = Array.isArray(updated?.configOptions) ? updated.configOptions : current.map((item) =>
+      item?.id === option.id ? { ...item, currentValue: value } : item,
+    )
+  }
+  return { ok: true, configOptions: current }
+}
+
+async function setupAcpSession({ client, initialized, cwd, resumeSessionId }) {
+  if (resumeSessionId === undefined) {
+    const created = await client.request('session/new', { cwd, mcpServers: [] })
+    if (typeof created?.sessionId !== 'string' || created.sessionId.length === 0) {
+      throw new AcpProtocolError(-32603, 'ACP session/new returned no sessionId')
+    }
+    return { sessionId: created.sessionId, setup: created }
+  }
+  if (initialized?.agentCapabilities?.loadSession === true) {
+    const loaded = await client.request('session/load', { sessionId: resumeSessionId, cwd, mcpServers: [] })
+    return { sessionId: resumeSessionId, setup: loaded }
+  }
+  if (initialized?.agentCapabilities?.sessionCapabilities?.resume != null) {
+    const resumed = await client.request('session/resume', { sessionId: resumeSessionId, cwd, mcpServers: [] })
+    return { sessionId: resumeSessionId, setup: resumed }
+  }
+  return { unsupported: true, sessionId: resumeSessionId }
+}
+
+function extractReplayUpdate(method, params, sessionId) {
+  if (method !== 'session/update' || params?.sessionId !== sessionId) return undefined
+  const update = params.update
+  const role = update?.sessionUpdate === 'user_message_chunk'
+    ? 'user'
+    : update?.sessionUpdate === 'agent_message_chunk'
+      ? 'assistant'
+      : undefined
+  if (role === undefined || update.content?.type !== 'text' || typeof update.content.text !== 'string') return undefined
+  return { role, text: update.content.text, messageId: typeof update.messageId === 'string' ? update.messageId : undefined }
+}
+
+function boundReplayMessages(messages, { maxTurns = MAX_HISTORY_TURNS, maxChars = MAX_HISTORY_CHARS } = {}) {
+  const turnLimit = Math.max(1, Math.min(20, Number.isFinite(maxTurns) ? Math.trunc(maxTurns) : MAX_HISTORY_TURNS))
+  const charLimit = Math.max(1, Math.min(MAX_HISTORY_CHARS, Number.isFinite(maxChars) ? Math.trunc(maxChars) : MAX_HISTORY_CHARS))
+  const candidates = messages.slice(-turnLimit)
+  const turns = []
+  let used = 0
+  let charTruncated = false
+  for (let index = candidates.length - 1; index >= 0; index--) {
+    const entry = candidates[index]
+    const remaining = charLimit - used
+    if (remaining <= 0) {
+      charTruncated = true
+      break
+    }
+    let text = entry.text
+    if (text.length > remaining) {
+      charTruncated = true
+      text = remaining <= TRUNC_MARKER.length ? text.slice(0, remaining) : text.slice(0, remaining - TRUNC_MARKER.length) + TRUNC_MARKER
+    }
+    turns.unshift({ role: entry.role, text, chars: text.length, ...(entry.messageId ? { id: entry.messageId } : {}) })
+    used += text.length
+    if (charTruncated) break
+  }
+  return { turns, chars: used, truncated: messages.length > turnLimit || charTruncated }
+}
+
 function extractTextUpdate(method, params, sessionId) {
   if (method !== 'session/update' || params?.sessionId !== sessionId) return undefined
   const update = params.update
@@ -281,28 +434,7 @@ export async function runAcpProcess({ options, env, request, resumeSessionId }) 
   }
   const prompt = typeof request.prompt === 'string' ? request.prompt : ''
   if (!prompt.trim()) throw new Error(`${PREFIX}: prompt is required`)
-  if (request.model !== undefined || request.reasoningEffort !== undefined) {
-    throw new Error(`${PREFIX}: generic ACP instances do not support model or effort overrides`)
-  }
-
-  const executable = await resolveCommand(env, options.command, options.env)
-  const handle = env.subprocess.spawn({
-    argv: [executable, ...options.args],
-    cwd,
-    ...(options.env === undefined ? {} : { env: options.env }),
-    stdio: {
-      stdin: 'pipe',
-      stdout: 'pipe',
-      stderr: { maxBytes: 65536 },
-    },
-    graceMs: 2000,
-    signal: env.signal,
-  })
-  const client = new AcpClient({
-    handle,
-    requestTimeoutMs: options.requestTimeoutMs,
-    logger: env.logger,
-  })
+  const { client, handle, initialized } = await openAcpConnection({ options: { ...options, cwd }, env, signal: env.signal })
   let text = ''
   let sessionId = resumeSessionId
   let abortRequested = false
@@ -310,7 +442,10 @@ export async function runAcpProcess({ options, env, request, resumeSessionId }) 
   const removeUpdate = client.onNotification((method, params) => {
     if (!collectingPromptOutput) return
     const chunk = extractTextUpdate(method, params, sessionId)
-    if (chunk !== undefined) text += chunk
+    if (chunk !== undefined) {
+      text += chunk
+      env.onUpdate?.({ type: 'text-delta', text: chunk })
+    }
   })
   const onAbort = () => {
     abortRequested = true
@@ -328,32 +463,33 @@ export async function runAcpProcess({ options, env, request, resumeSessionId }) 
     capabilities: acpCapabilities(),
   }
   try {
-    const initialized = await client.request('initialize', {
-      protocolVersion: 1,
-      clientCapabilities: {
-        fs: { readTextFile: false, writeTextFile: false },
-        terminal: false,
-      },
-      clientInfo: { name: 'dsh-subagent-code-agents', version: '0.1.0' },
+    const setup = await setupAcpSession({ client, initialized, cwd, resumeSessionId })
+    if (setup.unsupported === true) {
+      return {
+        ...base,
+        sessionId: resumeSessionId,
+        stopReason: 'unsupported',
+        output: `ACP agent for "${options.id}" advertises neither session/load nor session/resume`,
+        delivery: 'refused',
+        mayBeConcurrent: false,
+      }
+    }
+    sessionId = setup.sessionId
+    const overrides = await applyConfigOverrides({
+      client,
+      sessionId,
+      configOptions: setup.setup?.configOptions,
+      request,
     })
-    if (resumeSessionId !== undefined) {
-      if (initialized?.agentCapabilities?.loadSession !== true) {
-        return {
-          ...base,
-          sessionId: resumeSessionId,
-          stopReason: 'unsupported',
-          output: `ACP agent for "${options.id}" does not advertise session/load`,
-          delivery: 'refused',
-          mayBeConcurrent: false,
-        }
+    if (!overrides.ok) {
+      return {
+        ...base,
+        sessionId,
+        stopReason: 'unsupported',
+        output: overrides.message,
+        delivery: 'refused',
+        mayBeConcurrent: false,
       }
-      await client.request('session/load', { sessionId: resumeSessionId, cwd, mcpServers: [] })
-    } else {
-      const created = await client.request('session/new', { cwd, mcpServers: [] })
-      if (typeof created?.sessionId !== 'string' || created.sessionId.length === 0) {
-        throw new AcpProtocolError(-32603, 'ACP session/new returned no sessionId')
-      }
-      sessionId = created.sessionId
     }
     collectingPromptOutput = true
     const result = await client.request('session/prompt', {
@@ -388,6 +524,260 @@ export async function runAcpProcess({ options, env, request, resumeSessionId }) 
   }
 }
 
+export async function listAcpSessions({ options, env, opts }) {
+  if (opts.includeAll !== true && (typeof opts.cwd !== 'string' || opts.cwd.trim() === '')) {
+    throw new Error(`${PREFIX}: listSessions requires cwd unless includeAll is true`)
+  }
+  const limit = Math.max(1, Math.min(100, Number.isFinite(opts.limit) ? Math.trunc(opts.limit) : 50))
+  const connection = await openAcpConnection({ options, env, signal: env.signal })
+  const { client, initialized } = connection
+  try {
+    if (initialized?.agentCapabilities?.sessionCapabilities?.list == null) {
+      return unsupported(options.id, 'listSessions (agent omitted sessionCapabilities.list)', acpCapabilities())
+    }
+    const sessions = []
+    let cursor
+    let nextCursor
+    let pages = 0
+    do {
+      const result = await client.request('session/list', {
+        ...(opts.includeAll === true ? {} : { cwd: opts.cwd }),
+        ...(cursor === undefined ? {} : { cursor }),
+      })
+      const rows = Array.isArray(result?.sessions) ? result.sessions : []
+      for (const row of rows) {
+        if (typeof row?.sessionId !== 'string' || row.sessionId.length === 0) continue
+        sessions.push({
+          id: row.sessionId,
+          preview: typeof row.title === 'string' ? row.title.slice(0, 200) : undefined,
+          cwd: typeof row.cwd === 'string' ? row.cwd : undefined,
+          source: options.id,
+          status: 'stored',
+          updatedAt: typeof row.updatedAt === 'string' ? row.updatedAt : undefined,
+          delivery: 'external_or_idle',
+          steerable: false,
+        })
+        if (sessions.length > limit) break
+      }
+      nextCursor = typeof result?.nextCursor === 'string' && result.nextCursor.length > 0 ? result.nextCursor : undefined
+      if (sessions.length > limit || nextCursor === undefined) break
+      if (nextCursor === cursor) throw new AcpProtocolError(-32603, 'ACP session/list repeated the same cursor')
+      cursor = nextCursor
+      pages += 1
+    } while (pages < MAX_SESSION_PAGES)
+    return {
+      sessions: sessions.slice(0, limit),
+      truncated: sessions.length > limit || nextCursor !== undefined,
+    }
+  } finally {
+    await client.dispose()
+  }
+}
+
+async function sessionCwdForRead({ client, initialized, sessionId, fallbackCwd }) {
+  if (initialized?.agentCapabilities?.sessionCapabilities?.list == null) return fallbackCwd
+  let cursor
+  for (let page = 0; page < MAX_SESSION_PAGES; page++) {
+    const result = await client.request('session/list', cursor === undefined ? {} : { cursor })
+    const rows = Array.isArray(result?.sessions) ? result.sessions : []
+    const found = rows.find((row) => row?.sessionId === sessionId)
+    if (typeof found?.cwd === 'string' && found.cwd.length > 0) return found.cwd
+    const next = typeof result?.nextCursor === 'string' && result.nextCursor.length > 0 ? result.nextCursor : undefined
+    if (next === undefined) break
+    if (next === cursor) throw new AcpProtocolError(-32603, 'ACP session/list repeated the same cursor')
+    cursor = next
+  }
+  return fallbackCwd
+}
+
+export async function readAcpSession({ options, env, opts }) {
+  if (typeof opts.sessionId !== 'string' || opts.sessionId.length === 0) {
+    throw new Error(`${PREFIX}: readSession requires a session id`)
+  }
+  const connection = await openAcpConnection({ options, env, signal: env.signal })
+  const { client, initialized } = connection
+  const messages = []
+  const remove = client.onNotification((method, params) => {
+    const update = extractReplayUpdate(method, params, opts.sessionId)
+    if (update === undefined) return
+    const latest = messages.at(-1)
+    if (
+      latest?.role === update.role &&
+      ((latest.messageId !== undefined && latest.messageId === update.messageId) ||
+        (latest.messageId === undefined && update.messageId === undefined))
+    ) {
+      latest.text += update.text
+    } else {
+      messages.push(update)
+    }
+  })
+  try {
+    if (initialized?.agentCapabilities?.loadSession !== true) {
+      return unsupported(options.id, 'readSession (agent omitted loadSession replay)', acpCapabilities())
+    }
+    const cwd = await sessionCwdForRead({
+      client,
+      initialized,
+      sessionId: opts.sessionId,
+      fallbackCwd: options.cwd ?? env.cwd,
+    })
+    if (typeof cwd !== 'string' || cwd.trim() === '') {
+      throw new Error(`${PREFIX}: cannot determine cwd for session ${opts.sessionId}`)
+    }
+    await client.request('session/load', { sessionId: opts.sessionId, cwd, mcpServers: [] })
+    const bounded = boundReplayMessages(messages, { maxTurns: opts.maxTurns, maxChars: opts.maxChars })
+    return {
+      sessionId: opts.sessionId,
+      status: 'stored',
+      turns: bounded.turns,
+      truncated: bounded.truncated,
+      chars: bounded.chars,
+      delivery: 'external_or_idle',
+      steerable: false,
+      capabilities: acpCapabilities(),
+    }
+  } finally {
+    remove()
+    if (initialized?.agentCapabilities?.sessionCapabilities?.close != null) {
+      await client.request('session/close', { sessionId: opts.sessionId }).catch(() => {})
+    }
+    await client.dispose()
+  }
+}
+
+async function startManagedAcp({ options, env, managed, request }) {
+  const base = {
+    channel: options.id,
+    runId: `acp-managed-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+    capabilities: acpCapabilities(),
+  }
+  let connection
+  try {
+    const cwd = request.cwd ?? options.cwd ?? env.cwd
+    const prompt = typeof request.prompt === 'string' ? request.prompt : ''
+    if (typeof cwd !== 'string' || cwd.trim() === '') throw new Error('startManagedSession requires cwd')
+    if (!prompt.trim()) throw new Error('startManagedSession requires a prompt')
+    if (env.signal?.aborted) throw new Error('startManagedSession was aborted before launch')
+    connection = await openAcpConnection({ options: { ...options, cwd }, env })
+    const { client, handle, initialized } = connection
+    const setup = await setupAcpSession({ client, initialized, cwd })
+    const sessionId = setup.sessionId
+    const overrides = await applyConfigOverrides({
+      client,
+      sessionId,
+      configOptions: setup.setup?.configOptions,
+      request,
+    })
+    if (!overrides.ok) {
+      await client.dispose()
+      return {
+        ...base,
+        sessionId,
+        stopReason: 'unsupported',
+        output: overrides.message,
+        delivery: 'refused',
+        mayBeConcurrent: false,
+      }
+    }
+    const state = {
+      sessionId,
+      runId: base.runId,
+      client,
+      handle,
+      initialized,
+      status: 'active',
+      text: '',
+      cancelTimer: undefined,
+      settlement: undefined,
+    }
+    const remove = client.onNotification((method, params) => {
+      const chunk = extractTextUpdate(method, params, sessionId)
+      if (chunk !== undefined) state.text += chunk
+    })
+    managed.set(sessionId, state)
+    const promptResult = client.request('session/prompt', {
+      sessionId,
+      prompt: [{ type: 'text', text: prompt }],
+    })
+    state.settlement = (async () => {
+      try {
+        const result = await promptResult
+        state.status = state.status === 'cancelling' || result?.stopReason === 'cancelled' ? 'cancelled' : 'completed'
+      } catch (error) {
+        state.status = state.status === 'cancelling' ? 'cancelled' : 'failed'
+        env.logger?.warn?.(`${PREFIX}: managed ACP turn ${state.runId} ended: ${String(error?.message ?? error)}`)
+      } finally {
+        if (state.cancelTimer !== undefined) clearTimeout(state.cancelTimer)
+        remove()
+        if (managed.get(sessionId) === state) managed.delete(sessionId)
+        if (initialized?.agentCapabilities?.sessionCapabilities?.close != null) {
+          await client.request('session/close', { sessionId }).catch(() => {})
+        }
+        await client.dispose().catch(() => {})
+      }
+    })()
+    void state.settlement.catch(() => {})
+    return {
+      ...base,
+      sessionId,
+      stopReason: 'completed',
+      output: `managed ACP session started: ${sessionId}`,
+      delivery: 'managed_turn_started',
+      mayBeConcurrent: false,
+    }
+  } catch (error) {
+    await connection?.client?.dispose?.().catch(() => {})
+    return {
+      ...base,
+      stopReason: env.signal?.aborted ? 'aborted' : 'error',
+      output: `startManagedSession: ${String(error?.message ?? error)}`,
+      delivery: 'failed',
+      mayBeConcurrent: false,
+    }
+  }
+}
+
+function cancelManagedAcp({ options, managed, opts }) {
+  const base = {
+    channel: options.id,
+    runId: `acp-cancel-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+    sessionId: opts.sessionId,
+    capabilities: acpCapabilities(),
+  }
+  const state = managed.get(opts.sessionId)
+  if (state === undefined) {
+    return {
+      ...base,
+      stopReason: 'refused',
+      output: 'cannot cancel: session has no active turn owned by this channel',
+      delivery: 'external_or_idle',
+      mayBeConcurrent: false,
+    }
+  }
+  if (opts.runId !== undefined && opts.runId !== state.runId) {
+    return {
+      ...base,
+      stopReason: 'refused',
+      output: 'cannot cancel: runId does not match the owned active turn',
+      delivery: 'refused',
+      mayBeConcurrent: false,
+    }
+  }
+  if (state.status === 'active') {
+    state.status = 'cancelling'
+    state.client.notify('session/cancel', { sessionId: state.sessionId })
+    state.cancelTimer = setTimeout(() => state.handle.terminate?.(), 2000)
+    state.cancelTimer.unref?.()
+  }
+  return {
+    ...base,
+    stopReason: 'completed',
+    output: `cancellation requested for managed ACP run ${state.runId}`,
+    delivery: 'managed_turn_started',
+    mayBeConcurrent: false,
+  }
+}
+
 export function createAcpChannel(config = {}) {
   const options = {
     id: normalizeAcpChannelId(config.id),
@@ -400,6 +790,7 @@ export function createAcpChannel(config = {}) {
     cwd: config.cwd,
     requestTimeoutMs: normalizeTimeout(config.requestTimeoutMs),
   }
+  const managed = new Map()
   const channel = {
     id: options.id,
     displayName: options.displayName,
@@ -413,6 +804,40 @@ export function createAcpChannel(config = {}) {
         throw new Error(`${PREFIX}: resume requires a session id`)
       }
       return runAcpProcess({ options, env, request, resumeSessionId: sessionId })
+    },
+    async listSessions(opts, env) {
+      const result = await listAcpSessions({ options, env, opts })
+      if (!Array.isArray(result?.sessions)) return result
+      return {
+        ...result,
+        sessions: result.sessions.map((session) =>
+          managed.has(session.id)
+            ? { ...session, status: 'active', delivery: 'managed_turn_started', cancelable: true }
+            : session,
+        ),
+      }
+    },
+    async readSession(opts, env) {
+      const result = await readAcpSession({ options, env, opts })
+      if (result?.sessionId === undefined || result?.turns === undefined) return result
+      return managed.has(result.sessionId)
+        ? { ...result, status: 'active', delivery: 'managed_turn_started', cancelable: true }
+        : result
+    },
+    startManagedSession(request, env) {
+      return startManagedAcp({ options, env, managed, request })
+    },
+    cancel(opts) {
+      return cancelManagedAcp({ options, managed, opts })
+    },
+    async dispose() {
+      const states = [...managed.values()]
+      managed.clear()
+      for (const state of states) {
+        state.client.notify('session/cancel', { sessionId: state.sessionId })
+        state.handle.terminate?.()
+      }
+      await Promise.allSettled(states.map((state) => state.settlement))
     },
   }
   return channel

@@ -1,20 +1,18 @@
 /**
  * @dsh-subagent-code-agents/channel-claude-code
  *
- * Claude Code channel adapter for the multi-channel coding-agent core. Runs
- * the Anthropic Claude Code CLI headless (`claude -p --output-format
- * stream-json`) via the Node entry (no shell), with:
+ * Claude Code channel adapter for the multi-channel coding-agent core. Uses
+ * Anthropic's official Agent SDK while pinning it to the user's installed
+ * Claude Code executable, with:
  *   - per-call `--model` / `--effort`
  *   - `--resume <id>` / `--session-id <id>` for stored sessions
- *   - fixed `--permission-mode bypassPermissions` (exactly once) — Claude Code
- *     has no separate sandbox toggle, so sandboxBypassGuaranteed is FALSE and
- *     the README states that bypassing permission checks is not equivalent to
- *     disabling sandboxing.
+ *   - official listSessions / getSessionMessages read-only APIs
+ *   - streaming-input managed sessions with owned-only interrupt/cancel
+ *   - fixed `permissionMode: bypassPermissions`, explicit opt-in, and
+ *     `sandbox.enabled: false` on every SDK query
  *
- * JSONL session list/read are NOT implemented (capabilities false); the
- * reserved `parseClaudeSessionsJson` helper is an UNUSED placeholder, not a
- * working session list. Claude Code has no steer API, so steerActive is
- * unsupported and refused explicitly.
+ * Claude Code exposes interrupt, not a true mid-turn steer primitive, so
+ * steerActive remains unsupported and is refused explicitly.
  */
 
 import { emptyCapabilities, registry, tryRegister } from '@dsh-subagent-code-agents/core'
@@ -23,6 +21,12 @@ export const CHANNEL_ID = 'claude-code'
 export const CLAUDE_FIXED_PERMISSION_ARGV = Object.freeze(['--permission-mode', 'bypassPermissions'])
 
 const PREFIX = 'channel-claude-code'
+const MAX_HISTORY_CHARS = 12_000
+const MAX_HISTORY_TURNS = 20
+const TRUNC_MARKER = '…[truncated]'
+const DEFAULT_MANAGED_INIT_TIMEOUT_MS = 60_000
+const CLAUDE_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max'])
+let defaultSdkPromise
 
 /** Sanitize a model id: non-empty, bounded, no control chars. */
 export function normalizeModel(value) {
@@ -39,7 +43,11 @@ export function normalizeEffort(value) {
   if (typeof value !== 'string' || value.trim() === '') {
     throw new Error(`${PREFIX}: effort must be a non-empty string`)
   }
-  return value.trim()
+  const effort = value.trim().toLowerCase()
+  if (!CLAUDE_EFFORTS.has(effort)) {
+    throw new Error(`${PREFIX}: effort must be one of low, medium, high, xhigh, max`)
+  }
+  return effort
 }
 
 /**
@@ -296,6 +304,375 @@ export async function runClaudeProcess({ env, request, resumeSessionId }) {
   return { ...base, stopReason: 'error', output: finalText + extra }
 }
 
+async function loadClaudeSdk(options = {}) {
+  if (options.sdk !== undefined) return options.sdk
+  defaultSdkPromise ??= import('@anthropic-ai/claude-agent-sdk')
+  return defaultSdkPromise
+}
+
+function normalizeManagedInitTimeout(value) {
+  if (value === undefined) return DEFAULT_MANAGED_INIT_TIMEOUT_MS
+  if (!Number.isInteger(value) || value < 1_000 || value > 10 * 60_000) {
+    throw new Error(`${PREFIX}: managedInitTimeoutMs must be an integer between 1000 and 600000`)
+  }
+  return value
+}
+
+function textFromContent(value) {
+  if (typeof value === 'string') return value
+  if (Array.isArray(value)) {
+    return value
+      .filter((block) => block && block.type === 'text' && typeof block.text === 'string')
+      .map((block) => block.text)
+      .join('\n')
+  }
+  if (!value || typeof value !== 'object') return ''
+  return textFromContent(value.content)
+}
+
+function assistantTextFromSdkMessage(message) {
+  if (message?.type !== 'assistant' || message.parent_tool_use_id != null) return undefined
+  const text = textFromContent(message.message)
+  return text || undefined
+}
+
+function partialTextFromSdkMessage(message) {
+  if (message?.type !== 'stream_event') return undefined
+  const event = message.event
+  if (event?.type !== 'content_block_delta' || event.delta?.type !== 'text_delta') return undefined
+  return typeof event.delta.text === 'string' ? event.delta.text : undefined
+}
+
+function assertSdkInitPolicy(message) {
+  if (message?.type !== 'system' || message.subtype !== 'init') return
+  if (message.permissionMode !== 'bypassPermissions') {
+    throw new Error(`${PREFIX}: Claude Code did not enter bypassPermissions mode`)
+  }
+}
+
+/** Build the fixed Agent SDK options for one call. */
+export async function claudeSdkOptions({ env, options, request, resumeSessionId, abortController }) {
+  const cwd = request.cwd ?? request.parentCwd ?? env.cwd
+  if (typeof cwd !== 'string' || cwd.trim() === '') {
+    throw new Error(`${PREFIX}: no working directory — set cwd or parentCwd`)
+  }
+  const model = normalizeModel(request.model)
+  const effort = normalizeEffort(request.reasoningEffort)
+  const entry = await resolveClaudeEntry(env, {
+    ...(options.claudeExecutable ? { claudeExecutable: options.claudeExecutable } : {}),
+  })
+  return {
+    cwd,
+    ...(model === undefined ? {} : { model }),
+    ...(effort === undefined ? {} : { effort }),
+    ...(resumeSessionId === undefined ? {} : { resume: resumeSessionId }),
+    ...(abortController === undefined ? {} : { abortController }),
+    pathToClaudeCodeExecutable: entry.entry,
+    ...(/\.(?:m?js|cjs)$/iu.test(entry.entry) ? { executable: 'node' } : {}),
+    permissionMode: 'bypassPermissions',
+    allowDangerouslySkipPermissions: true,
+    sandbox: { enabled: false },
+    persistSession: true,
+    includePartialMessages: true,
+    systemPrompt: { type: 'preset', preset: 'claude_code' },
+  }
+}
+
+export async function runClaudeSdk({ env, options, request, resumeSessionId }) {
+  const prompt = typeof request.prompt === 'string' ? request.prompt : ''
+  if (!prompt.trim()) throw new Error(`${PREFIX}: prompt is required`)
+  const sdk = await loadClaudeSdk(options)
+  const abortController = new AbortController()
+  const onAbort = () => abortController.abort(env.signal?.reason)
+  if (env.signal) {
+    if (env.signal.aborted) onAbort()
+    else env.signal.addEventListener('abort', onAbort, { once: true })
+  }
+  const base = {
+    channel: CHANNEL_ID,
+    runId: `claude-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+    capabilities: claudeChannelCapabilities(),
+  }
+  let query
+  let sessionId
+  let assistantText = ''
+  let resultText
+  let resultError
+  let thrown
+  let sawPartialText = false
+  try {
+    const sdkOptions = await claudeSdkOptions({ env, options, request, resumeSessionId, abortController })
+    query = sdk.query({ prompt, options: sdkOptions })
+    for await (const message of query) {
+      assertSdkInitPolicy(message)
+      if (typeof message?.session_id === 'string') sessionId = message.session_id
+      const partial = partialTextFromSdkMessage(message)
+      if (partial !== undefined && partial.length > 0) {
+        sawPartialText = true
+        env.onUpdate?.({ type: 'text-delta', text: partial })
+      }
+      const text = assistantTextFromSdkMessage(message)
+      if (text !== undefined) {
+        assistantText = assistantText ? `${assistantText}\n${text}` : text
+        if (!sawPartialText) env.onUpdate?.({ type: 'text-delta', text })
+      }
+      if (message?.type === 'result') {
+        if (message.subtype === 'success' && typeof message.result === 'string') resultText = message.result
+        else resultError = Array.isArray(message.errors) ? message.errors.join('\n') : `Claude result: ${message.subtype}`
+      }
+    }
+  } catch (error) {
+    thrown = error
+  } finally {
+    if (env.signal) env.signal.removeEventListener('abort', onAbort)
+    try { query?.close?.() } catch {}
+  }
+  const output = resultText ?? assistantText
+  if (abortController.signal.aborted || env.signal?.aborted) {
+    return { ...base, ...(sessionId ? { sessionId } : {}), stopReason: 'aborted', output }
+  }
+  if (resultError !== undefined || thrown !== undefined) {
+    const diagnostic = resultError ?? String(thrown?.message ?? thrown)
+    return {
+      ...base,
+      ...(sessionId ? { sessionId } : {}),
+      stopReason: 'error',
+      output: `${output}${output ? '\n\n' : ''}[Claude SDK error] ${diagnostic}`,
+    }
+  }
+  if (resultText === undefined) {
+    return {
+      ...base,
+      ...(sessionId ? { sessionId } : {}),
+      stopReason: 'error',
+      output: `${output}${output ? '\n\n' : ''}[Claude SDK error] query ended without a result message`,
+    }
+  }
+  return {
+    ...base,
+    ...(sessionId ? { sessionId } : {}),
+    stopReason: 'completed',
+    output,
+    ...(resumeSessionId === undefined ? {} : { delivery: 'resume_unmanaged', mayBeConcurrent: true }),
+  }
+}
+
+function boundSessionMessages(messages, { maxTurns = MAX_HISTORY_TURNS, maxChars = MAX_HISTORY_CHARS } = {}) {
+  const turnLimit = Math.max(1, Math.min(20, Number.isFinite(maxTurns) ? Math.trunc(maxTurns) : MAX_HISTORY_TURNS))
+  const charLimit = Math.max(1, Math.min(MAX_HISTORY_CHARS, Number.isFinite(maxChars) ? Math.trunc(maxChars) : MAX_HISTORY_CHARS))
+  const normalized = []
+  for (const entry of messages) {
+    if (!entry || (entry.type !== 'user' && entry.type !== 'assistant')) continue
+    if (entry.parent_tool_use_id != null) continue
+    const text = textFromContent(entry.message)
+    if (text) normalized.push({ role: entry.type, text })
+  }
+  const candidates = normalized.slice(-turnLimit)
+  const turns = []
+  let used = 0
+  let charTruncated = false
+  for (let i = candidates.length - 1; i >= 0; i--) {
+    const entry = candidates[i]
+    const remaining = charLimit - used
+    if (remaining <= 0) {
+      charTruncated = true
+      break
+    }
+    let text = entry.text
+    if (text.length > remaining) {
+      charTruncated = true
+      text = remaining <= TRUNC_MARKER.length ? text.slice(0, remaining) : text.slice(0, remaining - TRUNC_MARKER.length) + TRUNC_MARKER
+    }
+    turns.unshift({ role: entry.role, text, chars: text.length })
+    used += text.length
+    if (charTruncated) break
+  }
+  return {
+    turns,
+    chars: used,
+    truncated: normalized.length > turnLimit || charTruncated,
+  }
+}
+
+class AsyncMessageQueue {
+  constructor(initial) {
+    this.values = [initial]
+    this.waiters = []
+    this.closed = false
+  }
+
+  next() {
+    if (this.values.length > 0) return Promise.resolve({ value: this.values.shift(), done: false })
+    if (this.closed) return Promise.resolve({ value: undefined, done: true })
+    return new Promise((resolve) => this.waiters.push(resolve))
+  }
+
+  close() {
+    if (this.closed) return
+    this.closed = true
+    for (const resolve of this.waiters.splice(0)) resolve({ value: undefined, done: true })
+  }
+
+  [Symbol.asyncIterator]() {
+    return this
+  }
+}
+
+function sdkUserMessage(prompt) {
+  return {
+    type: 'user',
+    message: { role: 'user', content: prompt },
+    parent_tool_use_id: null,
+  }
+}
+
+async function startManagedClaude({ env, options, managed, request }) {
+  const caps = claudeChannelCapabilities()
+  const base = {
+    channel: CHANNEL_ID,
+    runId: `claude-managed-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+    capabilities: caps,
+  }
+  let query
+  let queue
+  let timer
+  try {
+    const prompt = typeof request.prompt === 'string' ? request.prompt : ''
+    if (!prompt.trim()) throw new Error('startManagedSession requires a prompt')
+    if (env.signal?.aborted) throw new Error('startManagedSession was aborted before launch')
+    const sdk = await loadClaudeSdk(options)
+    const abortController = new AbortController()
+    const sdkOptions = await claudeSdkOptions({ env, options, request, abortController })
+    queue = new AsyncMessageQueue(sdkUserMessage(prompt))
+    query = sdk.query({ prompt: queue, options: sdkOptions })
+    let resolveReady
+    let rejectReady
+    const ready = new Promise((resolve, reject) => {
+      resolveReady = resolve
+      rejectReady = reject
+    })
+    const state = {
+      runId: base.runId,
+      sessionId: undefined,
+      query,
+      queue,
+      abortController,
+      status: 'starting',
+      text: '',
+      forceTimer: undefined,
+      settlement: undefined,
+    }
+    state.settlement = (async () => {
+      try {
+        for await (const message of query) {
+          assertSdkInitPolicy(message)
+          if (typeof message?.session_id === 'string' && state.sessionId === undefined) {
+            state.sessionId = message.session_id
+            state.status = 'active'
+            managed.set(state.sessionId, state)
+            resolveReady(state.sessionId)
+          }
+          const text = assistantTextFromSdkMessage(message)
+          if (text !== undefined) state.text = state.text ? `${state.text}\n${text}` : text
+          if (message?.type === 'result') {
+            state.status = state.status === 'cancelling' ? 'cancelled' : message.subtype === 'success' ? 'completed' : 'failed'
+            break
+          }
+        }
+        if (state.sessionId === undefined) rejectReady(new Error('Claude SDK ended before session initialization'))
+      } catch (error) {
+        state.status = state.status === 'cancelling' ? 'cancelled' : 'failed'
+        rejectReady(error)
+        env.logger?.warn?.(`${PREFIX}: managed Claude turn ${state.runId} ended: ${String(error?.message ?? error)}`)
+      } finally {
+        if (state.forceTimer !== undefined) clearTimeout(state.forceTimer)
+        queue.close()
+        try { query.close?.() } catch {}
+        if (state.sessionId !== undefined && managed.get(state.sessionId) === state) managed.delete(state.sessionId)
+      }
+    })()
+    void state.settlement.catch(() => {})
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error('Claude SDK managed session initialization timed out')), options.managedInitTimeoutMs)
+      timer.unref?.()
+    })
+    const sessionId = await Promise.race([ready, timeout])
+    clearTimeout(timer)
+    return {
+      ...base,
+      sessionId,
+      stopReason: 'completed',
+      output: `managed Claude Code session started: ${sessionId}`,
+      delivery: 'managed_turn_started',
+      mayBeConcurrent: false,
+    }
+  } catch (error) {
+    if (timer !== undefined) clearTimeout(timer)
+    queue?.close?.()
+    try { query?.close?.() } catch {}
+    return {
+      ...base,
+      stopReason: env.signal?.aborted ? 'aborted' : 'error',
+      output: `startManagedSession: ${String(error?.message ?? error)}`,
+      delivery: 'failed',
+      mayBeConcurrent: false,
+    }
+  }
+}
+
+async function cancelManagedClaude({ managed, opts }) {
+  const caps = claudeChannelCapabilities()
+  const base = {
+    channel: CHANNEL_ID,
+    runId: `claude-cancel-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+    sessionId: opts.sessionId,
+    capabilities: caps,
+  }
+  const state = managed.get(opts.sessionId)
+  if (state === undefined) {
+    return {
+      ...base,
+      stopReason: 'refused',
+      output: 'cannot cancel: session has no active turn owned by this channel',
+      delivery: 'external_or_idle',
+      mayBeConcurrent: false,
+    }
+  }
+  if (opts.runId !== undefined && opts.runId !== state.runId) {
+    return {
+      ...base,
+      stopReason: 'refused',
+      output: 'cannot cancel: runId does not match the owned active turn',
+      delivery: 'refused',
+      mayBeConcurrent: false,
+    }
+  }
+  try {
+    if (state.status === 'active') {
+      state.status = 'cancelling'
+      await state.query.interrupt()
+      state.queue.close()
+      state.forceTimer = setTimeout(() => state.query.close?.(), 2000)
+      state.forceTimer.unref?.()
+    }
+    return {
+      ...base,
+      stopReason: 'completed',
+      output: `cancellation requested for managed Claude Code run ${state.runId}`,
+      delivery: 'managed_turn_started',
+      mayBeConcurrent: false,
+    }
+  } catch (error) {
+    return {
+      ...base,
+      stopReason: 'error',
+      output: `cancel failed: ${String(error?.message ?? error)}`,
+      delivery: 'failed',
+      mayBeConcurrent: false,
+    }
+  }
+}
+
 /**
  * Bounded JSON-array session parser — UNUSED placeholder, NOT an implemented
  * capability. Claude Code's official session listing/transcript formats are
@@ -325,39 +702,107 @@ export function claudeChannelCapabilities() {
     ...emptyCapabilities(),
     run: true,
     resume: true,
-    listSessions: false,
-    readSession: false,
-    managedSession: false,
+    listSessions: true,
+    readSession: true,
+    managedSession: true,
     steerActive: false,
-    cancel: false,
+    cancel: true,
     streaming: false,
     modelOverride: true,
     effortOverride: true,
-    // Claude Code bypasses permission checks, but there is no separate
-    // "no sandbox" guarantee exposed by the CLI.
-    sandboxBypassGuaranteed: false,
+    // Every SDK query fixes bypassPermissions + explicit sandbox.enabled=false.
+    sandboxBypassGuaranteed: true,
   }
 }
 
 export function createClaudeCodeChannel(options = {}) {
-  const entryOpts = options.claudeExecutable ? { claudeExecutable: options.claudeExecutable } : {}
+  const normalizedOptions = {
+    ...options,
+    managedInitTimeoutMs: normalizeManagedInitTimeout(options.managedInitTimeoutMs),
+  }
+  const managed = new Map()
   return {
     id: CHANNEL_ID,
     displayName: 'Claude Code',
     capabilities: claudeChannelCapabilities(),
     async run(request, env) {
-      return runClaudeProcess({
+      return runClaudeSdk({
         env,
-        request: { ...request, ...entryOpts },
+        options: normalizedOptions,
+        request,
         resumeSessionId: request.resumeSessionId,
       })
     },
     async resume(request, env) {
-      return runClaudeProcess({
+      return runClaudeSdk({
         env,
-        request: { ...request, ...entryOpts },
+        options: normalizedOptions,
+        request,
         resumeSessionId: request.resumeSessionId ?? request.sessionId,
       })
+    },
+    async listSessions(opts) {
+      const sdk = await loadClaudeSdk(normalizedOptions)
+      if (opts.includeAll !== true && (typeof opts.cwd !== 'string' || opts.cwd.trim() === '')) {
+        throw new Error(`${PREFIX}: listSessions requires cwd unless includeAll is true`)
+      }
+      const limit = Math.max(1, Math.min(100, Number.isFinite(opts.limit) ? Math.trunc(opts.limit) : 50))
+      const rows = await sdk.listSessions({
+        ...(opts.includeAll === true ? {} : { dir: opts.cwd }),
+        limit: limit + 1,
+      })
+      const sessions = rows.slice(0, limit).map((session) => {
+        const active = managed.has(session.sessionId)
+        return {
+          id: session.sessionId,
+          preview: typeof session.summary === 'string' ? session.summary.slice(0, 200) : undefined,
+          cwd: session.cwd,
+          source: 'claude-code',
+          status: active ? 'active' : 'stored',
+          updatedAt: session.lastModified,
+          createdAt: session.createdAt,
+          delivery: active ? 'managed_turn_started' : 'external_or_idle',
+          steerable: false,
+          ...(active ? { cancelable: true } : {}),
+        }
+      })
+      return { sessions, truncated: rows.length > limit }
+    },
+    async readSession(opts) {
+      const sdk = await loadClaudeSdk(normalizedOptions)
+      const messages = await sdk.getSessionMessages(opts.sessionId)
+      const bounded = boundSessionMessages(messages, {
+        maxTurns: opts.maxTurns,
+        maxChars: opts.maxChars,
+      })
+      const active = managed.has(opts.sessionId)
+      return {
+        sessionId: opts.sessionId,
+        status: active ? 'active' : 'stored',
+        turns: bounded.turns,
+        truncated: bounded.truncated,
+        chars: bounded.chars,
+        delivery: active ? 'managed_turn_started' : 'external_or_idle',
+        steerable: false,
+        ...(active ? { cancelable: true } : {}),
+        capabilities: claudeChannelCapabilities(),
+      }
+    },
+    async startManagedSession(request, env) {
+      return startManagedClaude({ env, options: normalizedOptions, managed, request })
+    },
+    async cancel(opts) {
+      return cancelManagedClaude({ managed, opts })
+    },
+    async dispose() {
+      const states = [...managed.values()]
+      managed.clear()
+      for (const state of states) {
+        try { await state.query.interrupt() } catch {}
+        state.queue.close()
+        try { state.query.close?.() } catch {}
+      }
+      await Promise.allSettled(states.map((state) => state.settlement))
     },
   }
 }

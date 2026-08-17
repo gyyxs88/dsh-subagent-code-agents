@@ -274,6 +274,32 @@ test('providerFromChannel wraps channel.run into DSH provider result shape', asy
   assert.equal(result.output[0].text, 'hello world')
 })
 
+test('providerFromChannel exposes bounded optional updates without changing final result', async () => {
+  const fakeChannel = {
+    id: 'streaming-test',
+    displayName: 'Streaming',
+    capabilities: { run: true, streaming: false },
+    async run(request, env) {
+      env.onUpdate({ type: 'text-delta', text: 'hello ' })
+      env.onUpdate({ type: 'text-delta', text: request.prompt })
+      return {
+        channel: 'streaming-test',
+        runId: 'r-stream',
+        stopReason: 'completed',
+        output: `hello ${request.prompt}`,
+        capabilities: { run: true, streaming: false },
+      }
+    },
+  }
+  const provider = providerFromChannel(fakeChannel, {})
+  const run = await provider.start({ prompt: [{ type: 'text', text: 'world' }] })
+  const updates = []
+  for await (const update of run.updates) updates.push(update)
+  const result = await run.result
+  assert.deepEqual(updates, [{ type: 'text-delta', text: 'hello world' }])
+  assert.equal(result.output[0].text, 'hello world')
+})
+
 test('providerFromChannel maps channel errors to error stop reason', async () => {
   const fakeChannel = {
     id: 'grok-build',
@@ -309,13 +335,18 @@ test('bindChannelEnv binds session methods to the env (no env param needed)', as
       calls.push(['steerActive', opts, env])
       return {}
     },
+    async cancel(opts, env) {
+      calls.push(['cancel', opts, env])
+      return {}
+    },
   }
   const env = { marker: true }
   const bound = bindChannelEnv(channel, env)
   await bound.listSessions({ cwd: 'C:/ws' })
   await bound.readSession({ sessionId: 's1' })
   await bound.steerActive({ sessionId: 's1', input: 'x' })
-  assert.equal(calls.length, 3)
+  await bound.cancel({ sessionId: 's1', runId: 'r1' })
+  assert.equal(calls.length, 4)
   for (const [, , e] of calls) assert.equal(e.marker, true)
 })
 
@@ -328,6 +359,7 @@ test('tool layer registers subagent_code and coding_sessions_* tools', () => {
     'coding_session_read',
     'coding_session_start',
     'coding_session_send',
+    'coding_session_cancel',
     'coding_runs_list',
     'coding_run_read',
     'coding_run_resume',
@@ -339,6 +371,7 @@ test('tool layer registers subagent_code and coding_sessions_* tools', () => {
   assert.ok(!state.registeredTools.has('coding_sessions_read'))
   assert.ok(!state.registeredTools.has('coding_sessions_start'))
   assert.ok(!state.registeredTools.has('coding_sessions_send'))
+  assert.ok(!state.registeredTools.has('coding_sessions_cancel'))
 })
 
 test('subagent_code rejects unknown channel explicitly', async () => {
@@ -401,17 +434,20 @@ test('subagent_code rejects a call with no calling agent', async () => {
   registry.unregister('agent-req')
 })
 
-test('coding_session_send is NOT concurrency-safe (shared read-decide-act mutation)', async () => {
+test('managed session mutations are NOT concurrency-safe (shared read-decide-act mutation)', async () => {
   const { ctx, state } = makeCtx()
   registry.register({
     id: 'send-chan',
     displayName: 'SendChan',
-    capabilities: { run: true, steerActive: true },
+    capabilities: { run: true, steerActive: true, cancel: true },
     async run() {
       return { channel: 'send-chan', runId: 'r', stopReason: 'completed', output: 'ok', capabilities: {} }
     },
     async steerActive() {
       return { channel: 'send-chan', runId: 'r', stopReason: 'completed', output: 'steered', capabilities: {} }
+    },
+    async cancel() {
+      return { channel: 'send-chan', runId: 'r', stopReason: 'completed', output: 'cancelled', capabilities: {} }
     },
   })
   applyTool(ctx, {})
@@ -421,6 +457,11 @@ test('coding_session_send is NOT concurrency-safe (shared read-decide-act mutati
     state.registeredTools.get('coding_session_send').isConcurrencySafe({ channel: 'send-chan', session_id: 's1', prompt: 'x' }),
     false,
     'coding_session_send must be serial (read-decide-act on a shared session)',
+  )
+  assert.equal(
+    state.registeredTools.get('coding_session_cancel').isConcurrencySafe({ channel: 'send-chan', session_id: 's1' }),
+    false,
+    'coding_session_cancel must be serial (read-decide-act on a shared session)',
   )
   assert.equal(
     state.registeredTools.get('coding_sessions_list').isConcurrencySafe({ channel: 'send-chan' }),
@@ -433,6 +474,46 @@ test('coding_session_send is NOT concurrency-safe (shared read-decide-act mutati
     'read is parallel-safe',
   )
   registry.unregister('send-chan')
+})
+
+test('coding_session_cancel forwards owned session identity and refuses unsupported channels', async () => {
+  const { ctx, state } = makeCtx()
+  let received
+  registry.register({
+    id: 'cancel-ok',
+    displayName: 'CancelOK',
+    capabilities: { run: true, cancel: true },
+    async run() {
+      return { channel: 'cancel-ok', runId: 'r', stopReason: 'completed', output: 'ok', capabilities: {} }
+    },
+    async cancel(opts) {
+      received = opts
+      return { channel: 'cancel-ok', runId: opts.runId, stopReason: 'completed', output: 'cancel requested', capabilities: {} }
+    },
+  })
+  registry.register({
+    id: 'cancel-no',
+    displayName: 'CancelNo',
+    capabilities: { run: true, cancel: false },
+    async run() {
+      return { channel: 'cancel-no', runId: 'r', stopReason: 'completed', output: 'ok', capabilities: {} }
+    },
+  })
+  applyTool(ctx, {})
+  const tool = state.registeredTools.get('coding_session_cancel')
+  const exec = { agent: { id: 'a' }, signal: new AbortController().signal }
+  const result = await tool.execute(
+    { channel: 'cancel-ok', session_id: 's1', run_id: 'r1', reason: 'test done' },
+    exec,
+  )
+  assert.deepEqual(received, { sessionId: 's1', runId: 'r1', reason: 'test done' })
+  assert.equal(result.output, 'cancel requested')
+
+  const unsupported = await tool.execute({ channel: 'cancel-no', session_id: 's2' }, exec)
+  assert.equal(unsupported.stopReason, 'unsupported')
+  assert.match(unsupported.output, /does not support cancel/)
+  registry.unregister('cancel-ok')
+  registry.unregister('cancel-no')
 })
 
 test('coding_sessions_list refuses when channel lacks listSessions', async () => {

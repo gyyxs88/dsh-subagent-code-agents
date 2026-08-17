@@ -6,8 +6,8 @@ DeepSeek Harness（DSH）的多渠道编码代理子代理插件：内置 OpenAI
 packages/
   core/                    渠道适配器接口 + 注册表 + 统一结果 + Runtime 注入（无 DSH 依赖）
   channel-codex/           Codex 渠道（exec/resume + app-server 会话，固定绕过审批与沙箱）
-  channel-claude-code/     Claude Code 渠道（headless -p，固定 bypassPermissions）
-  channel-grok-build/      Grok Build 渠道（headless -p，固定权限，诚实报告非沙箱关闭）
+  channel-claude-code/     Claude Agent SDK 渠道（会话读取/托管/取消，固定审批与 sandbox off）
+  channel-grok-build/      Grok Build 渠道（headless + ACP 托管，会话读取，固定审批与 sandbox off）
   channel-acp/             通用 ACP v1 客户端（可配置多个 acp/<name> 实例）
   plugin/                  公开包 dsh-subagent-code-agents：cordis.patch.yml + 宿主组合 + 工具
 ```
@@ -26,20 +26,22 @@ packages/
 | --- | :-: | :-: | :-: | :-: |
 | run（一次性） | ✅ | ✅ | ✅ | ✅ |
 | resume（续跑会话） | ✅ | ✅ | ✅ | ✅¹ |
-| listSessions / readSession | ✅ | ❌ | ❌ | ❌ |
-| managedSession（`thread/start` 托管会话） | ✅ | ❌ | ❌ | ❌ |
+| listSessions / readSession | ✅ | ✅ | ✅ | ⚠️¹ |
+| managedSession（托管会话） | ✅ | ✅ | ✅ | ✅ |
 | steerActive（真 steer） | ✅ | ❌ | ❌ | ❌ |
-| cancel API | ✅ | ❌ | ❌ | ❌² |
+| cancel API | ✅ | ✅ | ✅ | ✅² |
 | streaming 到 DSH | ❌ | ❌ | ❌ | ❌ |
-| modelOverride / effortOverride | ✅ | ✅ | ✅ | ❌ |
-| **sandboxBypassGuaranteed** | ✅ | ❌ | ❌ | ❌ |
+| modelOverride / effortOverride | ✅ | ✅ | ✅ | ⚠️³ |
+| **sandboxBypassGuaranteed** | ✅ | ✅ | ✅ | ❌ |
 
-¹ ACP agent 必须在初始化响应中声明 `agentCapabilities.loadSession=true`，否则续跑显式返回 `unsupported`。² 调用中的 ACP 进程可通过 `session/cancel` 中止，但本插件没有宣称可按外部 session 任意取消，因此 channel capability 保持 `false`。
+¹ ACP 的 list 需要 agent 声明 `sessionCapabilities.list`；read 需要 `loadSession=true` 的历史回放。resume 优先使用 `session/load`，也支持稳定的 `sessionCapabilities.resume`；未声明时均显式返回 `unsupported`。² ACP cancel 仅作用于本插件创建并仍持有的 managed 活跃回合，不会尝试取消外部或空闲 session。³ model/effort 通过 session `configOptions` 的 `model` / `thought_level` 类别协商；agent 未提供对应选项或所请求值时显式 `unsupported`。
+
+`streaming 到 DSH` 一行仍是 ❌，指 DSH rc.6 尚未消费第三方 provider 的增量。渠道层已经通过 `RunEnv.onUpdate` 产生 `text-delta`，DSH provider 返回值也附带一个向后兼容、可选且有界的 `updates: AsyncIterable`；rc.6 会忽略这个未知字段，最终 `result` 仍是唯一权威终态，中间增量不会写入父模型上下文。待 DSH 上游把可选 `SubagentRun.updates` 纳入 Service Definition 并增加 UI/远端 Consumer 后，才会把矩阵改为 ✅。
 
 > `sandboxBypassGuaranteed` 是"真实保证"，不是口号：
 > - **codex**：CLI 每次 `--dangerously-bypass-approvals-and-sandbox`；app-server `thread/start`/`turn/start` 固定 `approvalPolicy:"never"` + `sandbox:"danger-full-access"`/`sandboxPolicy:{type:"dangerFullAccess"}` → **true**。
-> - **claude-code**：固定 `--permission-mode bypassPermissions`，但 Claude Code 没有独立的"关闭沙箱"开关暴露给 CLI → **false**。README 明示：绕过权限审批 ≠ 沙箱关闭。
-> - **grok-build**：固定 `--permission-mode bypassPermissions` + `--no-auto-update`；本机 1.0.3 `--help` 无任何可验证的 off/unrestricted 沙箱模式 → **false**。权限绕过不等于沙箱关闭。
+> - **claude-code**：所有调用经官方 Agent SDK 固定 `permissionMode:'bypassPermissions'` + `allowDangerouslySkipPermissions:true` + `sandbox:{enabled:false}`，初始化若未进入 bypass 模式即 fail-closed → **true**。list/read 使用 SDK 官方 API；managed cancel 仅中断本插件持有的流式输入会话。
+> - **grok-build**：每次 run/resume 固定 `--permission-mode bypassPermissions` + 官方定义为 unrestricted read/write/network 的 `--sandbox off`；managed 使用隔离的 `grok --sandbox off agent --always-approve --no-leader stdio` → **true**。会话列表/读取直接使用 Grok 官方文档定义的 `summary.json` 与 `updates.jsonl`，只读、有界且不会续跑会话。
 > - **ACP**：权限与沙箱由所配置的 ACP agent 决定；通用客户端不虚构保证 → **false**。
 
 ## 统一结果
@@ -73,6 +75,7 @@ packages/
 - **`coding_session_read`** — 必填 `channel` + `session_id`；`max_turns` 1..20。
 - **`coding_session_start`** — 必填 `channel` + `prompt`；可选 `model` / `reasoning_effort` / `cwd`。
 - **`coding_session_send`** — 必填 `channel` + `session_id` + `prompt`；托管会话 active 时 steer，否则显式拒绝。
+- **`coding_session_cancel`** — 必填 `channel` + `session_id`；可选 `run_id` / `reason`。只取消当前插件进程拥有的 active turn，外部/空闲会话显式拒绝。
 - **`coding_runs_list` / `coding_run_read`** — 查看本插件创建的后台运行；不会保存原始 prompt。
 - **`coding_run_resume`** — 从有 sessionId 且当前通道仍支持 resume 的旧记录启动一个**新的**后台运行，并以 `resumedFrom` 关联。
 - **`coding_run_cancel`** — 只取消当前插件进程真实持有的 active run；重启前的记录会明确拒绝取消。
@@ -156,7 +159,7 @@ npm pack
   config: { channel: grok-build, providerName: coding-agent/grok-build }
 ```
 
-每行可配置渠道专属 executable：`codexExecutable`（codex 原生二进制或 POSIX 启动器，跨平台优先）、`nodeExecutable` + `codexJs`（codex 的 JS 入口兼容配置）、`claudeExecutable`（claude-code，须为真实二进制，不接受 `.cmd/.ps1`）、`grokExecutable`（grok-build，同上）。`codexExecutable` 与 `codexJs` 不可同时设置。
+每行可配置渠道专属 executable：`codexExecutable`（codex 原生二进制或 POSIX 启动器，跨平台优先）、`nodeExecutable` + `codexJs`（codex 的 JS 入口兼容配置）、`claudeExecutable`（claude-code，须为真实二进制，不接受 `.cmd/.ps1`）、`grokExecutable`（grok-build，同上）。Claude Agent SDK 固定指向这个已安装 CLI，因此继续复用用户原有登录和配置；Grok 还可用 `grokHome` 指向自定义的 `GROK_HOME`，供会话列表/读取使用，未配置时遵循 `GROK_HOME` 环境变量，再回退到 `~/.grok`。`codexExecutable` 与 `codexJs` 不可同时设置。
 
 macOS 上若 DSH 的 PATH 没有包含渠道 CLI，可显式填写绝对路径，例如：
 
@@ -184,7 +187,7 @@ ACP 实例按需追加；`id`/`name` 只写实例名，注册后是 `acp/<name>`
     requestTimeoutMs: 30000
 ```
 
-通用实现依据 ACP stable v1 的 `initialize → session/new|session/load → session/prompt` 生命周期，并从 `session/update` 的 `agent_message_chunk` 收集文本。客户端声明不提供文件系统和终端能力，`mcpServers` 为空；需要这些桥接能力时应由 DSH 侧另行明确设计，而不是隐式开放。协议参考：[ACP TypeScript SDK](https://github.com/agentclientprotocol/typescript-sdk)、[ACP v1 schema](https://github.com/agentclientprotocol/agent-client-protocol/blob/main/schema/v1/schema.json)。
+通用实现依据 ACP stable v1 动态协商：基础生命周期为 `initialize → session/new|load|resume → session/prompt`；可选接入 `session/list`、`session/close`、load 历史回放和 `session/set_config_option`。客户端声明不提供文件系统和终端能力，`mcpServers` 为空；需要这些桥接能力时应由 DSH 侧另行明确设计，而不是隐式开放。协议参考：[ACP TypeScript SDK](https://github.com/agentclientprotocol/typescript-sdk)、[ACP v1 schema](https://github.com/agentclientprotocol/agent-client-protocol/blob/main/schema/v1/schema.json)。
 
 > **工具行**：与旧插件一样，`subagent_code` 与 `coding_sessions_*` 工具由 preset 中的工具行暴露。在会话 preset 的 `agent.cordis.yml` 加入：
 
@@ -199,7 +202,7 @@ ACP 实例按需追加；`id`/`name` 只写实例名，注册后是 `acp/<name>`
 | --- | --- |
 | `subagent_codex`（provider `codex`） | `subagent_code`（`channel: "codex"`，provider `coding-agent/codex`） |
 | `subagent_codex.resume_session_id` | `subagent_code.resume_session_id`（语义一致：`codex exec resume`） |
-| `codex_sessions_list` / `read` / `start` / `send` | `coding_sessions_list` / `coding_session_read` / `coding_session_start` / `coding_session_send`（需显式 `channel: "codex"`） |
+| `codex_sessions_list` / `read` / `start` / `send` / `cancel` | `coding_sessions_list` / `coding_session_read` / `coding_session_start` / `coding_session_send` / `coding_session_cancel`（需显式 `channel: "codex"`） |
 | `tool-subagent-codex` 工具行 | `tool-subagent-code-agents` 工具行（需按上文在 preset 中加入；非自动启用） |
 
 固定安全策略不变：codex 始终 `--dangerously-bypass-approvals-and-sandbox`；app-server 始终 `never` + `dangerFullAccess`；`sandboxMode` 配置不存在。
@@ -219,8 +222,8 @@ ACP 实例按需追加；`id`/`name` 只写实例名，注册后是 `acp/<name>`
 ### 当前边界
 
 - **Claude Code / Grok Build 的会话能力（list/read/start/send）为 false**：这两个渠道的 `coding_sessions_*` 工具会显式返回 `unsupported`。渠道包中保留的 `parseClaudeSessionsJson` / `parseGrokSessions` 是**未启用的纯函数占位**——Claude 的官方 JSONL transcript 与会话列表格式、Grok 的 SQLite 会话存储都**未**在本轮实现为可用能力，capability 保持 `false` 是权威状态，不以存在 parser 函数为"已实现"。
-- **ACP 只实现稳定的一次调用/载入续跑路径**：不宣称 session list/read、managed steer、模型/强度覆盖或进程跨重启存活；codex 的真 steer 仍仅限 app-server 托管会话。
-- **固定 full-access 策略**：codex `sandboxBypassGuaranteed=true`；claude/grok 仅权限审批绕过（`bypassPermissions`），沙箱关闭无保证（`false`）。
+- **ACP 能力按 agent 协商**：支持稳定的 list/load replay/resume/close/configOptions 时启用对应路径；缺失就显式 `unsupported`。managed/cancel 只覆盖本插件持有的进程，进程跨重启仍不存活；真 steer 仍仅限 Codex app-server。
+- **固定 full-access 策略**：codex 固定 `danger-full-access`；Claude Agent SDK 固定 `sandbox.enabled=false`；Grok 固定 `--sandbox off`，三者均为 `sandboxBypassGuaranteed=true`。通用 ACP 仍由外部 agent 决定，保持 `false`。
 
 ## 相关项目与定位
 

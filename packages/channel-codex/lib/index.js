@@ -131,6 +131,7 @@ export async function runCodexExec({ env, request, resumeSessionId, capabilities
     if (!event || typeof event !== 'object') return
     if (event.type === 'item.completed' && event.item && event.item.type === 'agent_message' && typeof event.item.text === 'string') {
       finalText = finalText ? `${finalText}\n${event.item.text}` : event.item.text
+      env.onUpdate?.({ type: 'text-delta', text: event.item.text })
     } else if (event.type === 'thread.started' && typeof event.thread_id === 'string') {
       startedThreadId = event.thread_id
     } else if (event.type === 'turn.completed' || event.type === 'thread.completed') {

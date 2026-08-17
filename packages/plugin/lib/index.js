@@ -38,8 +38,15 @@ export const CHANNEL_FACTORIES = Object.freeze({
       appServerRequestTimeoutMs: cfg.appServerRequestTimeoutMs,
       cwd: cfg.cwd,
     }),
-  'claude-code': (cfg) => createClaudeCodeChannel({ claudeExecutable: cfg.claudeExecutable }),
-  'grok-build': (cfg) => createGrokBuildChannel({ grokExecutable: cfg.grokExecutable }),
+  'claude-code': (cfg) => createClaudeCodeChannel({
+    claudeExecutable: cfg.claudeExecutable,
+    managedInitTimeoutMs: cfg.managedInitTimeoutMs,
+  }),
+  'grok-build': (cfg) => createGrokBuildChannel({
+    grokExecutable: cfg.grokExecutable,
+    grokHome: cfg.grokHome,
+    managedRequestTimeoutMs: cfg.managedRequestTimeoutMs,
+  }),
   acp: (cfg) => createAcpChannel({
     id: cfg.id ?? cfg.name,
     displayName: cfg.displayName,
@@ -82,6 +89,56 @@ export function toSubagentStopReason(result) {
     case 'error':
     default:
       return 'error'
+  }
+}
+
+/**
+ * Single-consumer, bounded update stream. Adjacent text deltas are coalesced
+ * while no consumer is waiting, so rc.6 hosts that ignore the optional field
+ * cannot cause unbounded buffering. The terminal result remains authoritative.
+ */
+class ChannelUpdateQueue {
+  constructor() {
+    this.pending = undefined
+    this.waiters = []
+    this.closed = false
+  }
+
+  push(update) {
+    if (this.closed || update?.type !== 'text-delta' || typeof update.text !== 'string' || update.text.length === 0) return
+    const waiter = this.waiters.shift()
+    if (waiter !== undefined) {
+      waiter({ value: update, done: false })
+      return
+    }
+    const text = `${this.pending?.text ?? ''}${update.text}`
+    this.pending = { type: 'text-delta', text: text.slice(-65_536) }
+  }
+
+  next() {
+    if (this.pending !== undefined) {
+      const value = this.pending
+      this.pending = undefined
+      return Promise.resolve({ value, done: false })
+    }
+    if (this.closed) return Promise.resolve({ value: undefined, done: true })
+    return new Promise((resolve) => this.waiters.push(resolve))
+  }
+
+  close() {
+    if (this.closed) return
+    this.closed = true
+    for (const resolve of this.waiters.splice(0)) resolve({ value: undefined, done: true })
+  }
+
+  return() {
+    this.pending = undefined
+    this.close()
+    return Promise.resolve({ value: undefined, done: true })
+  }
+
+  [Symbol.asyncIterator]() {
+    return this
   }
 }
 
@@ -132,7 +189,15 @@ export function providerFromChannel(channel, env, providerName) {
         background: request.background === true,
       }
       const signal = request.signal
-      const envWithSignal = { ...env, signal }
+      const updates = new ChannelUpdateQueue()
+      const envWithSignal = {
+        ...env,
+        signal,
+        onUpdate(update) {
+          try { env.onUpdate?.(update) } catch {}
+          updates.push(update)
+        },
+      }
       const result = channel
         .run(runRequest, envWithSignal)
         .then((r) => ({
@@ -150,11 +215,15 @@ export function providerFromChannel(channel, env, providerName) {
           channel: channel.id,
           capabilities: channel.capabilities,
         }))
+        .finally(() => updates.close())
       return {
         id: `${channel.id}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
         localAgent: undefined,
+        // Forward-compatible DSH seam: rc.6 ignores unknown fields; a future
+        // host can consume these observations without changing final result.
+        updates,
         result,
-        async dispose() {},
+        async dispose() { updates.close() },
       }
     },
     async dispose() {

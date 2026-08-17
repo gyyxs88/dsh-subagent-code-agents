@@ -16,6 +16,15 @@ export class AcpProtocolError extends Error {
   constructor(code: number, message: string, detail?: unknown)
 }
 
+export class AcpClient {
+  constructor(opts: { handle: unknown; requestTimeoutMs: number; logger?: RunEnv['logger'] })
+  readonly closed: boolean
+  onNotification(listener: (method: string, params: unknown) => void): () => void
+  request(method: string, params: unknown): Promise<unknown>
+  notify(method: string, params: unknown): void
+  dispose(): Promise<void>
+}
+
 export function normalizeAcpChannelId(value: string): string
 export function createAcpChannel(config: AcpChannelConfig): CodingAgentChannel
 export function registerAcpChannel(config: AcpChannelConfig): CodingAgentChannel | Error
@@ -25,3 +34,13 @@ export function runAcpProcess(opts: {
   request: RunRequest
   resumeSessionId?: string
 }): Promise<ChannelResult>
+export function listAcpSessions(opts: {
+  options: Required<Pick<AcpChannelConfig, 'id' | 'command' | 'args' | 'requestTimeoutMs'>> & AcpChannelConfig
+  env: RunEnv
+  opts: { cwd?: string; includeAll?: boolean; limit?: number }
+}): Promise<unknown>
+export function readAcpSession(opts: {
+  options: Required<Pick<AcpChannelConfig, 'id' | 'command' | 'args' | 'requestTimeoutMs'>> & AcpChannelConfig
+  env: RunEnv
+  opts: { sessionId: string; maxTurns?: number; maxChars?: number }
+}): Promise<unknown>

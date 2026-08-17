@@ -8,6 +8,7 @@ import {
   claudePrintArgv,
   claudeResumeArgv,
   createClaudeCodeChannel,
+  normalizeEffort,
   parseClaudeSessionsJson,
   parseClaudeStreamLine,
   resolveClaudeEntry,
@@ -172,16 +173,22 @@ test('parseClaudeSessionsJson is bounded and cwd-aware', () => {
   assert.deepEqual(parseClaudeSessionsJson('garbage'), [])
 })
 
-test('claude channel capabilities: no sessions/steer, no sandbox guarantee', () => {
+test('claude channel capabilities: SDK sessions + managed/cancel + sandbox off, no true steer', () => {
   const channel = createClaudeCodeChannel()
   assert.equal(channel.id, 'claude-code')
   assert.equal(channel.capabilities.run, true)
   assert.equal(channel.capabilities.resume, true)
-  assert.equal(channel.capabilities.listSessions, false)
-  assert.equal(channel.capabilities.readSession, false)
-  assert.equal(channel.capabilities.managedSession, false)
+  assert.equal(channel.capabilities.listSessions, true)
+  assert.equal(channel.capabilities.readSession, true)
+  assert.equal(channel.capabilities.managedSession, true)
   assert.equal(channel.capabilities.steerActive, false)
-  assert.equal(channel.capabilities.sandboxBypassGuaranteed, false)
+  assert.equal(channel.capabilities.cancel, true)
+  assert.equal(channel.capabilities.sandboxBypassGuaranteed, true)
+})
+
+test('Claude effort is restricted to SDK-supported values', () => {
+  assert.equal(normalizeEffort(' XHIGH '), 'xhigh')
+  assert.throws(() => normalizeEffort('extreme'), /low, medium, high, xhigh, max/)
 })
 
 test('unsupported capability produces explicit structured refusal (no fallback)', () => {
@@ -192,101 +199,193 @@ test('unsupported capability produces explicit structured refusal (no fallback)'
   assert.equal(result.delivery, 'refused')
 })
 
-function fakeHandle({ script, exitCode = 0, stderrText = '' }) {
-  const state = { stdoutHandler: undefined }
-  const handle = {
-    stdin: { write() { return true }, end() {} },
-    stdout: {
-      on(event, fn) {
-        if (event === 'data') state.stdoutHandler = fn
-      },
+function staticSdk(messages, capture = {}) {
+  return {
+    query(params) {
+      capture.query = params
+      return {
+        async *[Symbol.asyncIterator]() {
+          for (const message of messages) yield message
+        },
+        close() { capture.closed = true },
+      }
     },
-    stderr: { on() {} },
-    collected: { stderr: { readFrom: () => ({ text: stderrText }) } },
-    done: new Promise((resolve) => {
-      setImmediate(() => {
-        for (const line of script) {
-          state.stdoutHandler?.(Buffer.from(line + '\n'))
-        }
-        resolve({ exitCode, signal: null })
-      })
-    }),
-    terminate() {},
+    async listSessions(opts) {
+      capture.listOptions = opts
+      return capture.sessions ?? []
+    },
+    async getSessionMessages(sessionId, opts) {
+      capture.read = { sessionId, opts }
+      return capture.messages ?? []
+    },
   }
-  return handle
 }
 
-test('run parses stream-json and returns sessionId + completed', async () => {
+test('SDK run fixes approval/sandbox policy and returns authoritative result', async () => {
   const env = makeEnv()
-  let spawned
-  env.subprocess.spawn = (spec) => {
-    spawned = spec
-    return fakeHandle({
-      script: [
-        JSON.stringify({ type: 'system', subtype: 'init', session_id: 'sess-1' }),
-        JSON.stringify({ type: 'assistant', message: { content: 'hi there' } }),
-        // ResultMessage carries the final result text (may duplicate assistant
-        // output in real streams — we concatenate both).
-        JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'hi there', session_id: 'sess-1' }),
-      ],
-    })
-  }
-  const channel = createClaudeCodeChannel({ claudeExecutable: 'C:/fake/bin/claude.exe' })
-  const result = await channel.run({ prompt: 'hello', cwd: 'C:/ws' }, env)
+  const updates = []
+  env.onUpdate = (update) => updates.push(update)
+  const capture = {}
+  const sdk = staticSdk([
+    { type: 'system', subtype: 'init', permissionMode: 'bypassPermissions', session_id: 'sess-1' },
+    { type: 'assistant', message: { content: [{ type: 'text', text: 'hi there' }] }, parent_tool_use_id: null, session_id: 'sess-1' },
+    { type: 'result', subtype: 'success', is_error: false, result: 'hi there', session_id: 'sess-1' },
+  ], capture)
+  const channel = createClaudeCodeChannel({ claudeExecutable: 'C:/fake/bin/claude.exe', sdk })
+  const result = await channel.run({ prompt: 'hello', cwd: 'C:/ws', model: 'claude-opus-4', reasoningEffort: 'high' }, env)
   assert.equal(result.stopReason, 'completed')
-  // The final `result` line is authoritative; the assistant block is NOT
-  // duplicated into the output.
   assert.equal(result.output, 'hi there')
   assert.equal(result.sessionId, 'sess-1')
   assert.equal(result.channel, 'claude-code')
-  assert.ok(spawned.argv.includes('bypassPermissions'))
-  assert.equal(spawned.argv[0], 'C:/fake/bin/claude.exe')
+  assert.equal(capture.query.prompt, 'hello')
+  assert.equal(capture.query.options.pathToClaudeCodeExecutable, 'C:/fake/bin/claude.exe')
+  assert.equal(capture.query.options.permissionMode, 'bypassPermissions')
+  assert.equal(capture.query.options.allowDangerouslySkipPermissions, true)
+  assert.deepEqual(capture.query.options.sandbox, { enabled: false })
+  assert.equal(capture.query.options.model, 'claude-opus-4')
+  assert.equal(capture.query.options.effort, 'high')
+  assert.deepEqual(capture.query.options.systemPrompt, { type: 'preset', preset: 'claude_code' })
+  assert.deepEqual(updates, [{ type: 'text-delta', text: 'hi there' }])
 })
 
-test('run treats a result line with is_error=true as an error', async () => {
+test('SDK run treats error result as error and fails closed on permission policy drift', async () => {
   const env = makeEnv()
-  env.subprocess.spawn = () =>
-    fakeHandle({
-      script: [
-        JSON.stringify({ type: 'system', subtype: 'init', session_id: 'sess-e' }),
-        JSON.stringify({ type: 'assistant', message: { content: 'partial' } }),
-        JSON.stringify({ type: 'result', subtype: 'error', is_error: true, result: 'failed to run', session_id: 'sess-e' }),
-      ],
-      exitCode: 0,
-    })
-  const channel = createClaudeCodeChannel({ claudeExecutable: 'C:/fake/bin/claude.exe' })
+  const sdk = staticSdk([
+    { type: 'system', subtype: 'init', permissionMode: 'bypassPermissions', session_id: 'sess-e' },
+    { type: 'result', subtype: 'error_during_execution', is_error: true, errors: ['failed to run'], session_id: 'sess-e' },
+  ])
+  const channel = createClaudeCodeChannel({ claudeExecutable: 'C:/fake/bin/claude.exe', sdk })
   const result = await channel.run({ prompt: 'hi', cwd: 'C:/ws' }, env)
   assert.equal(result.stopReason, 'error')
   assert.match(result.output, /failed to run/)
+
+  const drift = createClaudeCodeChannel({
+    claudeExecutable: 'C:/fake/bin/claude.exe',
+    sdk: staticSdk([{ type: 'system', subtype: 'init', permissionMode: 'default', session_id: 'sess-drift' }]),
+  })
+  const drifted = await drift.run({ prompt: 'hi', cwd: 'C:/ws' }, env)
+  assert.equal(drifted.stopReason, 'error')
+  assert.match(drifted.output, /did not enter bypassPermissions/)
 })
 
-test('run with resumeSessionId uses --resume argv and marks resume_unmanaged + concurrent', async () => {
+test('SDK resume passes session id and marks resume unmanaged/concurrent', async () => {
   const env = makeEnv()
-  let spawned
-  env.subprocess.spawn = (spec) => {
-    spawned = spec
-    return fakeHandle({
-      script: [
-        JSON.stringify({ type: 'system', subtype: 'init', session_id: 'sess-2' }),
-        JSON.stringify({ type: 'assistant', message: { content: 'cont' } }),
-      ],
-    })
-  }
-  const channel = createClaudeCodeChannel({ claudeExecutable: 'C:/fake/bin/claude.exe' })
+  const capture = {}
+  const sdk = staticSdk([
+    { type: 'system', subtype: 'init', permissionMode: 'bypassPermissions', session_id: 'sess-2' },
+    { type: 'result', subtype: 'success', is_error: false, result: 'cont', session_id: 'sess-2' },
+  ], capture)
+  const channel = createClaudeCodeChannel({ claudeExecutable: 'C:/fake/bin/claude.exe', sdk })
   const result = await channel.run({ prompt: 'go', cwd: 'C:/ws', resumeSessionId: 'sess-2' }, env)
   assert.equal(result.stopReason, 'completed')
-  assert.ok(spawned.argv.includes('--resume'))
-  assert.ok(spawned.argv.includes('sess-2'))
+  assert.equal(capture.query.options.resume, 'sess-2')
   assert.equal(result.delivery, 'resume_unmanaged')
   assert.equal(result.mayBeConcurrent, true)
 })
 
-test('run with nonzero exit and no text returns error with stderr', async () => {
+test('SDK list/read are bounded and preserve external-or-idle delivery honesty', async () => {
+  const capture = {
+    sessions: [
+      { sessionId: 's1', summary: 'A'.repeat(300), cwd: 'C:/ws', lastModified: 2, createdAt: 1 },
+      { sessionId: 's2', summary: 'second', cwd: 'C:/ws', lastModified: 1 },
+    ],
+    messages: [
+      { type: 'user', parent_tool_use_id: null, message: { role: 'user', content: 'question' } },
+      { type: 'assistant', parent_tool_use_id: 'subagent', message: { role: 'assistant', content: 'nested hidden' } },
+      { type: 'assistant', parent_tool_use_id: null, message: { role: 'assistant', content: [{ type: 'text', text: 'answer' }] } },
+    ],
+  }
+  const channel = createClaudeCodeChannel({ sdk: staticSdk([], capture) })
+  const listed = await channel.listSessions({ cwd: 'C:/ws', limit: 1 }, makeEnv())
+  assert.equal(listed.sessions.length, 1)
+  assert.equal(listed.sessions[0].id, 's1')
+  assert.equal(listed.sessions[0].preview.length, 200)
+  assert.equal(listed.sessions[0].delivery, 'external_or_idle')
+  assert.equal(listed.truncated, true)
+  assert.deepEqual(capture.listOptions, { dir: 'C:/ws', limit: 2 })
+
+  const read = await channel.readSession({ sessionId: 's1', maxTurns: 20 }, makeEnv())
+  assert.deepEqual(read.turns.map((turn) => [turn.role, turn.text]), [['user', 'question'], ['assistant', 'answer']])
+  assert.equal(read.delivery, 'external_or_idle')
+  assert.equal(read.capabilities.readSession, true)
+})
+
+function managedSdk(capture) {
+  return {
+    query(params) {
+      capture.query = params
+      let release
+      const interrupted = new Promise((resolve) => { release = resolve })
+      return {
+        async *[Symbol.asyncIterator]() {
+          const first = await params.prompt[Symbol.asyncIterator]().next()
+          capture.firstInput = first.value
+          yield { type: 'system', subtype: 'init', permissionMode: 'bypassPermissions', session_id: 'managed-claude-1' }
+          await interrupted
+          yield { type: 'result', subtype: 'success', is_error: false, result: 'stopped', session_id: 'managed-claude-1' }
+        },
+        async interrupt() {
+          capture.interrupts = (capture.interrupts ?? 0) + 1
+          release()
+          return { still_queued: [] }
+        },
+        close() {
+          capture.closed = true
+          release()
+        },
+      }
+    },
+    async listSessions(opts) {
+      capture.listOptions = opts
+      return [{ sessionId: 'managed-claude-1', summary: 'active', cwd: 'C:/ws', lastModified: 1 }]
+    },
+    async getSessionMessages() { return [] },
+  }
+}
+
+test('managed SDK session uses streaming input and owned-only interrupt cancel', async () => {
+  const capture = {}
+  const sdk = managedSdk(capture)
+  const channel = createClaudeCodeChannel({
+    claudeExecutable: 'C:/fake/bin/claude.exe',
+    sdk,
+    managedInitTimeoutMs: 5000,
+  })
   const env = makeEnv()
-  env.subprocess.spawn = () =>
-    fakeHandle({ script: [], exitCode: 1, stderrText: 'boom happened' })
-  const channel = createClaudeCodeChannel({ claudeExecutable: 'C:/fake/bin/claude.exe' })
-  const result = await channel.run({ prompt: 'hi', cwd: 'C:/ws' }, env)
-  assert.equal(result.stopReason, 'error')
-  assert.match(result.output, /boom happened/)
+  const started = await channel.startManagedSession({
+    prompt: 'fix it',
+    cwd: 'C:/ws',
+    model: 'claude-opus-4',
+    reasoningEffort: 'xhigh',
+  }, env)
+  assert.equal(started.stopReason, 'completed')
+  assert.equal(started.sessionId, 'managed-claude-1')
+  assert.equal(started.delivery, 'managed_turn_started')
+  assert.equal(started.mayBeConcurrent, false)
+  assert.equal(capture.firstInput.message.content, 'fix it')
+  assert.equal(capture.query.options.permissionMode, 'bypassPermissions')
+  assert.deepEqual(capture.query.options.sandbox, { enabled: false })
+  assert.equal(capture.query.options.model, 'claude-opus-4')
+  assert.equal(capture.query.options.effort, 'xhigh')
+
+  const listed = await channel.listSessions({ cwd: 'C:/ws', limit: 10 }, env)
+  assert.equal(listed.sessions[0].status, 'active')
+  assert.equal(listed.sessions[0].cancelable, true)
+
+  const wrong = await channel.cancel({ sessionId: started.sessionId, runId: 'wrong' }, env)
+  assert.equal(wrong.stopReason, 'refused')
+  assert.equal(capture.interrupts, undefined)
+  const cancelled = await channel.cancel({ sessionId: started.sessionId, runId: started.runId }, env)
+  assert.equal(cancelled.stopReason, 'completed')
+  assert.equal(capture.interrupts, 1)
+  await new Promise((resolve) => setImmediate(resolve))
+  await channel.dispose()
+  assert.equal(capture.closed, true)
+})
+
+test('Claude cancel refuses external or idle sessions', async () => {
+  const channel = createClaudeCodeChannel({ sdk: staticSdk([]) })
+  const result = await channel.cancel({ sessionId: 'external' }, makeEnv())
+  assert.equal(result.stopReason, 'refused')
+  assert.equal(result.delivery, 'external_or_idle')
 })

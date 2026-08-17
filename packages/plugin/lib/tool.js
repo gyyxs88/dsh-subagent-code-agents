@@ -375,6 +375,26 @@ export function apply(ctx, config = {}) {
           return channel.steerActive({ sessionId: args.session_id, input: args.prompt })
         },
       },
+      coding_session_cancel: {
+        description:
+          'Cancel the active turn of a managed coding-agent session. Only a turn owned by this live plugin process can be cancelled; external, idle and mismatched runs are refused.',
+        parameters: {
+          channel: { type: 'string', required: true, description: 'Channel id.' },
+          session_id: { type: 'string', required: true, description: 'Managed session/thread id.' },
+          run_id: { type: 'string', description: 'Optional active run id for strict ownership matching.' },
+          reason: { type: 'string', description: 'Optional cancellation reason.' },
+        },
+        async execute(args, _exec, channel) {
+          if (!hasCapability(channel, 'cancel') || typeof channel.cancel !== 'function') {
+            return unsupported(channel.id, 'cancel', channel.capabilities)
+          }
+          return channel.cancel({
+            sessionId: args.session_id,
+            runId: args.run_id,
+            reason: args.reason,
+          })
+        },
+      },
     }
 
     for (const [toolName, def] of Object.entries(definitions)) {
@@ -390,9 +410,11 @@ export function apply(ctx, config = {}) {
                 { type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value, null, 2) },
               ],
             },
-            // coding_session_send is a shared read-decide-act mutation on a
-            // session; keep it serial. The rest are read-only or create-only.
-            isConcurrencySafe: () => toolName !== 'coding_session_send',
+            // Send and cancel are shared read-decide-act mutations on a
+            // managed session; keep them serial. The rest are read-only or
+            // create-only.
+            isConcurrencySafe: () =>
+              toolName !== 'coding_session_send' && toolName !== 'coding_session_cancel',
             async execute(args, exec) {
               if (!exec || !exec.agent) {
                 throw new Error(`${toolName} requires a calling agent`)
