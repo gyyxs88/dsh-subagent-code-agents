@@ -1,8 +1,12 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { apply as applyAutoTool, presetAllowsAutoTools } from '../lib/auto-tool.js'
+import { Context } from '@deepseek-ai/cordis'
+import { emptyCapabilities, registry } from '@dsh-subagent-code-agents/core'
+import * as AutoToolPlugin from '../lib/auto-tool.js'
 import { toolNames } from '../lib/tool.js'
+
+const { apply: applyAutoTool, presetAllowsAutoTools } = AutoToolPlugin
 
 function makeAgent(presetId, initialTools = []) {
   const tools = new Map(initialTools.map((name) => [name, { name }]))
@@ -157,4 +161,92 @@ test('manual complete tool row wins and partial conflicts fail closed', () => {
   assert.deepEqual([...partial.tools.keys()], ['subagent_code'])
   assert.equal(host.logs.debug.some((message) => message.includes('already mounts')), true)
   assert.equal(host.logs.warn.some((message) => message.includes('partial conflicting')), true)
+})
+
+test('auto-mounted subagent_code uses the host-injected service across agent isolation', async () => {
+  const ctx = new Context()
+  const registeredTools = new Map()
+  const starts = []
+  const agents = []
+  const serviceDisposers = [
+    ctx.provide('tools', {
+      register(definition) {
+        registeredTools.set(definition.name, definition)
+        return () => registeredTools.delete(definition.name)
+      },
+      get(name) {
+        return registeredTools.get(name)
+      },
+    }),
+    ctx.provide('subagents', {
+      async start(name, request) {
+        starts.push({ name, request })
+        return {
+          result: Promise.resolve({
+            output: [{ type: 'text', text: 'AUTO_INJECT_OK' }],
+            stopReason: 'completed',
+          }),
+          async dispose() {},
+        }
+      },
+    }),
+    ctx.provide('agents', {
+      list: () => [...agents],
+      get: (id) => agents.find((agent) => agent.id === id),
+    }),
+    ctx.provide('agentPresets', {
+      composedPreset: () => 'standard',
+    }),
+  ]
+  const channelId = 'auto-inject-test'
+  registry.replace({
+    id: channelId,
+    displayName: 'Auto Inject Test',
+    capabilities: { ...emptyCapabilities(), run: true },
+    async run() {
+      throw new Error('channel.run must be owned by the registered subagent provider')
+    },
+  })
+
+  let agentCtx
+  const agentFiber = ctx.isolate('subagents').plugin({
+    inject: ['tools'],
+    apply(scope) {
+      agentCtx = scope
+    },
+  })
+  let autoFiber
+  try {
+    await agentFiber
+    const agent = {
+      id: 'isolated-agent',
+      ctx: agentCtx,
+      session: { header: { cwd: 'D:\\test' } },
+    }
+    agents.push(agent)
+    assert.throws(() => agentCtx.subagents, /cannot get property "subagents" without inject/)
+
+    autoFiber = ctx.plugin(AutoToolPlugin)
+    await autoFiber
+    const tool = registeredTools.get('subagent_code')
+    assert.ok(tool, 'subagent_code must be auto-mounted')
+
+    const result = await tool.execute(
+      {
+        channel: channelId,
+        description: 'verify injected service',
+        prompt: 'Return the marker.',
+        run_in_background: false,
+      },
+      { agent, signal: new AbortController().signal },
+    )
+    assert.equal(result.output[0].text, 'AUTO_INJECT_OK')
+    assert.equal(starts.length, 1)
+    assert.equal(starts[0].name, `coding-agent/${channelId}`)
+  } finally {
+    await autoFiber?.dispose()
+    await agentFiber.dispose()
+    registry.unregister(channelId)
+    await Promise.allSettled(serviceDisposers.reverse().map((dispose) => dispose()))
+  }
 })

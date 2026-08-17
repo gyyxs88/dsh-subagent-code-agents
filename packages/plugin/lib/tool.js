@@ -119,7 +119,11 @@ function clampInt(value, min, max, fallback) {
   return Math.min(max, Math.max(min, Math.round(n)))
 }
 
-export function apply(ctx, config = {}) {
+export function apply(ctx, config = {}, injected = {}) {
+  // Explicit Cordis mounts resolve this through the plugin's own injected
+  // context. The host auto-mount policy passes its already-injected service
+  // because an agent scope may intentionally isolate `subagents`.
+  const subagents = injected.subagents ?? ctx.subagents
   const providerPrefix = config.providerPrefix ?? 'coding-agent'
   const backgroundEnabled = config.enableRunInBackground !== false
   const roles = loadRoleRegistry(config)
@@ -174,7 +178,7 @@ export function apply(ctx, config = {}) {
         run: () => ({
           cancel: (reason) => controller.abort(reason ?? 'background subagent task killed'),
           done: settleOwnedStart(
-            ctx.subagents.start(providerName, { ...request, signal: controller.signal }),
+            subagents.start(providerName, { ...request, signal: controller.signal }),
             controller.signal,
             ownedRuns,
             record.id,
@@ -220,11 +224,11 @@ export function apply(ctx, config = {}) {
             },
             model: {
               type: 'string',
-              description: 'Optional per-call model override; unsupported by the channel → explicit refusal.',
+              description: 'Optional exact per-call model id; for Codex use the full id (for example gpt-5.6-sol), never an abbreviation such as sol. Unsupported by the channel → explicit refusal.',
             },
             reasoning_effort: {
               type: 'string',
-              description: 'Optional per-call reasoning-effort override; unsupported by the channel → explicit refusal.',
+              description: 'Optional per-call reasoning-effort override (for example xhigh); unsupported by the channel → explicit refusal.',
             },
             resume_session_id: {
               type: 'string',
@@ -298,7 +302,7 @@ export function apply(ctx, config = {}) {
                 sessionId: args.resume_session_id,
               })
             }
-            const run = await ctx.subagents.start(providerName, { ...request, signal: exec.signal })
+            const run = await subagents.start(providerName, { ...request, signal: exec.signal })
             return settleForegroundRun(run)
           },
         }),
@@ -351,8 +355,8 @@ export function apply(ctx, config = {}) {
         parameters: {
           channel: { type: 'string', required: true, description: 'Channel id.' },
           prompt: { type: 'string', required: true, description: 'First message text.' },
-          model: { type: 'string', description: 'Optional model override.' },
-          reasoning_effort: { type: 'string', description: 'Optional reasoning-effort override.' },
+          model: { type: 'string', description: 'Optional exact model id; for Codex use the full id such as gpt-5.6-sol, never sol.' },
+          reasoning_effort: { type: 'string', description: 'Optional reasoning-effort override, for example xhigh.' },
           cwd: { type: 'string', description: 'Optional working directory; defaults to caller cwd.' },
         },
         async execute(args, exec, channel) {

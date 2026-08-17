@@ -33,6 +33,7 @@ export function apply(ctx, config = {}) {
   const excludedPresets = Array.isArray(config.excludedPresets)
     ? config.excludedPresets
     : ['minimal']
+  const injected = { subagents: ctx.subagents }
   const mounted = new Map()
   let stopping = false
 
@@ -61,9 +62,10 @@ export function apply(ctx, config = {}) {
 
     // The effect body runs synchronously, matching DSH's own agent-scoped tool
     // policies. This avoids a first-turn race that a deferred child plugin
-    // activation could introduce after agent/created.
+    // activation could introduce after agent/created. Pass the host plugin's
+    // injected service explicitly because agent contexts isolate `subagents`.
     const cleanup = agent.ctx.effect(
-      () => applyTool(agent.ctx),
+      () => applyTool(agent.ctx, {}, injected),
       'coding-agent-tools.auto-mount()',
     )
     mounted.set(agent, cleanup)

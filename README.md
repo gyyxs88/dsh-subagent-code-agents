@@ -70,10 +70,10 @@ packages/
 
 ## 工具接口
 
-- **`subagent_code`** — 必填 `description` / `prompt`，并提供 `channel` 或已配置的 `role`；可选 `model` / `reasoning_effort` / `resume_session_id` / `run_in_background`。显式模型与强度覆盖角色默认值；角色/通道冲突、未知角色和能力缺口都显式拒绝。
+- **`subagent_code`** — 必填 `description` / `prompt`，并提供 `channel` 或已配置的 `role`；可选 `model` / `reasoning_effort` / `resume_session_id` / `run_in_background`。显式模型与强度覆盖角色默认值；模型必须使用渠道接受的完整 ID（Codex 例如 `gpt-5.6-sol`，不要写成 `sol`）；角色/通道冲突、未知角色和能力缺口都显式拒绝。
 - **`coding_sessions_list`** — 必填 `channel`；默认按调用者 cwd 过滤，`include_all:true` 显式跨项目；`limit` 1..100。
 - **`coding_session_read`** — 必填 `channel` + `session_id`；`max_turns` 1..20。
-- **`coding_session_start`** — 必填 `channel` + `prompt`；可选 `model` / `reasoning_effort` / `cwd`。
+- **`coding_session_start`** — 必填 `channel` + `prompt`；可选 `model` / `reasoning_effort` / `cwd`，模型同样必须使用完整渠道 ID。
 - **`coding_session_send`** — 必填 `channel` + `session_id` + `prompt`；托管会话 active 时 steer，否则显式拒绝。
 - **`coding_session_cancel`** — 必填 `channel` + `session_id`；可选 `run_id` / `reason`。只取消当前插件进程拥有的 active turn，外部/空闲会话显式拒绝。
 - **`coding_runs_list` / `coding_run_read`** — 查看本插件创建的后台运行；不会保存原始 prompt。
@@ -91,7 +91,7 @@ packages/
     roles:
       - id: reviewer
         channel: codex
-        model: gpt-5.6-codex
+        model: gpt-5.6-sol
         reasoningEffort: xhigh
         instructions: '先审查证据，再提出最小修改。'
         allowDelegation: false
