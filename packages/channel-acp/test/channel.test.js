@@ -119,6 +119,7 @@ test('ACP resume uses session/load and marks the delivery unmanaged/concurrent',
   const standard = standardScript()
   const handle = makeHandle((message) => {
     if (message.method === 'session/load') {
+      const response = standard(message)
       return [
         {
           jsonrpc: '2.0',
@@ -128,7 +129,7 @@ test('ACP resume uses session/load and marks the delivery unmanaged/concurrent',
             update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'old-history' } },
           },
         },
-        { jsonrpc: '2.0', id: message.id, result: {} },
+        response,
       ]
     }
     return standard(message)
