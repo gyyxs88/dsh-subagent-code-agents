@@ -19,8 +19,9 @@ export class AppServerError extends Error {
 
 export interface AppServerClientOptions {
   spawn: (argv: string[], opts: { cwd?: string }) => object
-  node: string
-  js: string
+  argvPrefix?: string[]
+  node?: string
+  js?: string
   cwd?: string
   requestTimeoutMs?: number
   logger?: { info: Function; warn: Function; error: Function }
@@ -50,6 +51,7 @@ export function classifyThreadStatus(
 ): 'active_managed' | 'idle_managed' | 'external_or_idle' | 'system_error'
 
 export function createCodexAppServerChannel(options?: {
+  codexExecutable?: string
   nodeExecutable?: string
   codexJs?: string
   appServerRequestTimeoutMs?: number

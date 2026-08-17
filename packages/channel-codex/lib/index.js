@@ -22,6 +22,7 @@ export const CODEX_REASONING_EFFORTS = Object.freeze(['low', 'medium', 'high', '
 export const CODEX_FIXED_SANDBOX_ARGV = Object.freeze(['--dangerously-bypass-approvals-and-sandbox'])
 
 const PREFIX = 'channel-codex'
+const WINDOWS_SHELL_SHIM_RE = /\.(?:cmd|ps1|bat)$/iu
 
 export function normalizeModel(value) {
   if (value === undefined) return undefined
@@ -52,12 +53,21 @@ export function codexInvocationArgs(request) {
   ]
 }
 
+function codexArgvPrefix({ argvPrefix, node, js }) {
+  const prefix = Array.isArray(argvPrefix) ? argvPrefix : [node, js]
+  if (prefix.length === 0 || prefix.some((part) => typeof part !== 'string' || part.length === 0)) {
+    throw new Error(`${PREFIX}: Codex argv prefix is invalid`)
+  }
+  return [...prefix]
+}
+
 /**
  * Build the complete `codex exec` argv deterministically. The sandbox portion
  * is always exactly `CODEX_FIXED_SANDBOX_ARGV`.
  */
-export function codexExecArgv({ node, js, cwd, request }) {
-  return [node, js, 'exec', '--json', '--skip-git-repo-check', '--color', 'never', '-C', cwd]
+export function codexExecArgv({ argvPrefix, node, js, cwd, request }) {
+  return codexArgvPrefix({ argvPrefix, node, js })
+    .concat('exec', '--json', '--skip-git-repo-check', '--color', 'never', '-C', cwd)
     .concat(codexInvocationArgs(request), CODEX_FIXED_SANDBOX_ARGV)
 }
 
@@ -65,11 +75,12 @@ export function codexExecArgv({ node, js, cwd, request }) {
  * Build the complete `codex exec resume` argv. `resume` has its own option set:
  * no `--color`, no `-C`; prompt is sent on stdin (`-`).
  */
-export function codexExecResumeArgv({ node, js, sessionId, request }) {
+export function codexExecResumeArgv({ argvPrefix, node, js, sessionId, request }) {
   if (typeof sessionId !== 'string' || sessionId.length === 0) {
     throw new Error(`${PREFIX}: resume requires a non-empty session id`)
   }
-  return [node, js, 'exec', 'resume', sessionId, '-', '--json', '--skip-git-repo-check']
+  return codexArgvPrefix({ argvPrefix, node, js })
+    .concat('exec', 'resume', sessionId, '-', '--json', '--skip-git-repo-check')
     .concat(codexInvocationArgs(request), CODEX_FIXED_SANDBOX_ARGV)
 }
 
@@ -81,11 +92,11 @@ export function codexExecResumeArgv({ node, js, sessionId, request }) {
 export async function runCodexExec({ env, request, resumeSessionId, capabilities: capabilitiesOverride }) {
   const cwd = request.cwd ?? request.parentCwd ?? env.cwd
   if (!cwd) throw new Error(`${PREFIX}: no working directory — set cwd or parentCwd`)
-  const { node, js } = await resolveCodexEntry(env, request)
+  const { argvPrefix } = await resolveCodexEntry(env, request)
   const argv =
     resumeSessionId === undefined
-      ? codexExecArgv({ node, js, cwd, request })
-      : codexExecResumeArgv({ node, js, sessionId: resumeSessionId, request })
+      ? codexExecArgv({ argvPrefix, cwd, request })
+      : codexExecResumeArgv({ argvPrefix, sessionId: resumeSessionId, request })
   const prompt = typeof request.prompt === 'string' ? request.prompt : ''
   if (!prompt.trim()) throw new Error(`${PREFIX}: prompt is required`)
 
@@ -198,29 +209,70 @@ export async function runCodexExec({ env, request, resumeSessionId, capabilities
   return { ...base, stopReason: 'error', output: finalText + extra }
 }
 
-/** Resolve node.exe + bin/codex.js, honoring per-channel executable config. */
-export async function resolveCodexEntry(env, request = {}) {
-  const node = request.nodeExecutable || (await env.subprocess.resolveExecutable('node').catch(() => {
-    throw new Error(`${PREFIX}: cannot locate node.exe`)
-  }))
-  let js = request.codexJs
-  if (js === undefined) {
-    try {
-      const shim = await env.subprocess.resolveExecutable('codex')
-      const sep = Math.max(shim.lastIndexOf('\\'), shim.lastIndexOf('/'))
-      const dir = sep >= 0 ? shim.slice(0, sep) : ''
-      if (dir) {
-        const candidate = env.path.join(dir, 'node_modules', '@openai', 'codex', 'bin', 'codex.js')
-        if (env.fs.existsSync(candidate)) js = candidate
-      }
-    } catch {}
+async function resolveNode(env, configured) {
+  if (configured) return configured
+  return env.subprocess.resolveExecutable('node').catch(() => {
+    throw new Error(`${PREFIX}: cannot locate node`)
+  })
+}
+
+function validateCodexExecutable(value) {
+  if (typeof value !== 'string' || value.length === 0 || /[\0\r\n]/u.test(value)) {
+    throw new Error(`${PREFIX}: codexExecutable must be a non-empty path`)
   }
-  if (js === undefined) {
+  if (WINDOWS_SHELL_SHIM_RE.test(value)) {
+    throw new Error(`${PREFIX}: codexExecutable must be a real executable, not a shell shim`)
+  }
+  return value
+}
+
+/**
+ * Resolve a Codex launch prefix.
+ *
+ * Native executables and POSIX shebang/symlink launchers are invoked directly,
+ * which supports the official macOS installer, Homebrew-style links and Unix
+ * npm bin links. Windows npm shell shims remain unsupported by no-shell spawn,
+ * so they are translated to the adjacent bin/codex.js entry as before.
+ */
+export async function resolveCodexEntry(env, request = {}) {
+  if (request.codexExecutable !== undefined && request.codexJs !== undefined) {
+    throw new Error(`${PREFIX}: configure codexExecutable or codexJs, not both`)
+  }
+
+  if (request.codexExecutable !== undefined) {
+    const executable = validateCodexExecutable(request.codexExecutable)
+    return { argvPrefix: [executable], executable }
+  }
+
+  if (request.codexJs !== undefined) {
+    const node = await resolveNode(env, request.nodeExecutable)
+    return { argvPrefix: [node, request.codexJs], node, js: request.codexJs }
+  }
+
+  let executable
+  try {
+    executable = await env.subprocess.resolveExecutable('codex')
+  } catch {}
+  if (typeof executable !== 'string' || executable.length === 0) {
     throw new Error(
-      `${PREFIX}: cannot locate the Codex CLI (bin/codex.js) — install it with \`npm install -g @openai/codex\` or set codexJs`,
+      `${PREFIX}: cannot locate the Codex CLI — install it or set codexExecutable/codexJs`,
     )
   }
-  return { node, js }
+
+  if (!WINDOWS_SHELL_SHIM_RE.test(executable)) {
+    return { argvPrefix: [executable], executable }
+  }
+
+  const sep = Math.max(executable.lastIndexOf('\\'), executable.lastIndexOf('/'))
+  const dir = sep >= 0 ? executable.slice(0, sep) : ''
+  const js = dir ? env.path.join(dir, 'node_modules', '@openai', 'codex', 'bin', 'codex.js') : undefined
+  if (js !== undefined && env.fs.existsSync(js)) {
+    const node = await resolveNode(env, request.nodeExecutable)
+    return { argvPrefix: [node, js], node, js }
+  }
+  throw new Error(
+    `${PREFIX}: codex resolves to a Windows shell shim (${executable}) but bin/codex.js was not found; set codexExecutable or codexJs`,
+  )
 }
 
 /**
@@ -252,14 +304,14 @@ export function createCodexChannel(options = {}) {
     async run(request, env) {
       return runCodexExec({
         env,
-        request: { ...request, ...(options.nodeExecutable ? { nodeExecutable: options.nodeExecutable } : {}), ...(options.codexJs ? { codexJs: options.codexJs } : {}) },
+        request: { ...request, ...(options.codexExecutable ? { codexExecutable: options.codexExecutable } : {}), ...(options.nodeExecutable ? { nodeExecutable: options.nodeExecutable } : {}), ...(options.codexJs ? { codexJs: options.codexJs } : {}) },
         resumeSessionId: request.resumeSessionId,
       })
     },
     async resume(request, env) {
       return runCodexExec({
         env,
-        request: { ...request, ...(options.nodeExecutable ? { nodeExecutable: options.nodeExecutable } : {}), ...(options.codexJs ? { codexJs: options.codexJs } : {}) },
+        request: { ...request, ...(options.codexExecutable ? { codexExecutable: options.codexExecutable } : {}), ...(options.nodeExecutable ? { nodeExecutable: options.nodeExecutable } : {}), ...(options.codexJs ? { codexJs: options.codexJs } : {}) },
         resumeSessionId: request.resumeSessionId ?? request.sessionId,
       })
     },

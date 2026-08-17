@@ -50,14 +50,14 @@ class PendingRequest {
 }
 
 export class AppServerClient {
-  constructor({ spawn, node, js, cwd, requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS, logger }) {
+  constructor({ spawn, argvPrefix, node, js, cwd, requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS, logger }) {
     if (typeof spawn !== 'function') throw new Error('AppServerClient: spawn is required')
-    if (typeof node !== 'string' || typeof js !== 'string') {
-      throw new Error('AppServerClient: node and js are required')
+    const prefix = Array.isArray(argvPrefix) ? argvPrefix : [node, js]
+    if (prefix.length === 0 || prefix.some((part) => typeof part !== 'string' || part.length === 0)) {
+      throw new Error('AppServerClient: argvPrefix or node and js are required')
     }
     this._spawn = spawn
-    this._node = node
-    this._js = js
+    this._argvPrefix = [...prefix]
     this._cwd = cwd
     this._requestTimeoutMs = requestTimeoutMs
     this._logger = logger ?? { info() {}, warn() {}, error() {} }
@@ -111,7 +111,7 @@ export class AppServerClient {
 
   async _startAndInitialize() {
     const handle = this._spawn(
-      [this._node, this._js, 'app-server'],
+      [...this._argvPrefix, 'app-server'],
       { cwd: this._cwd },
     )
     if (!handle || typeof handle.done?.then !== 'function' || !handle.stdout || typeof handle.stdout.on !== 'function') {
@@ -492,8 +492,7 @@ function summarizeThread(thread) {
 export function createCodexAppServerChannel(options = {}) {
   const clientOptions = {
     spawn: undefined, // filled lazily from env
-    node: undefined,
-    js: undefined,
+    argvPrefix: undefined,
     requestTimeoutMs: options.appServerRequestTimeoutMs,
     logger: options.logger,
   }
@@ -522,9 +521,8 @@ export function createCodexAppServerChannel(options = {}) {
     }
     if (clientOptions.spawn === undefined) {
       const { resolveCodexEntry } = await import('./index.js')
-      const { node, js } = await resolveCodexEntry(env, options)
-      clientOptions.node = node
-      clientOptions.js = js
+      const { argvPrefix } = await resolveCodexEntry(env, options)
+      clientOptions.argvPrefix = argvPrefix
       clientOptions.spawn = (argv, opts) =>
         env.subprocess.spawn({
           argv,
@@ -553,7 +551,7 @@ export function createCodexAppServerChannel(options = {}) {
       const { runCodexExec } = await import('./index.js')
       return runCodexExec({
         env,
-        request: { ...request, ...(options.codexJs ? { codexJs: options.codexJs } : {}), ...(options.nodeExecutable ? { nodeExecutable: options.nodeExecutable } : {}) },
+        request: { ...request, ...(options.codexExecutable ? { codexExecutable: options.codexExecutable } : {}), ...(options.codexJs ? { codexJs: options.codexJs } : {}), ...(options.nodeExecutable ? { nodeExecutable: options.nodeExecutable } : {}) },
         resumeSessionId: request.resumeSessionId,
         capabilities: base.capabilities,
       })
@@ -562,7 +560,7 @@ export function createCodexAppServerChannel(options = {}) {
       const { runCodexExec } = await import('./index.js')
       return runCodexExec({
         env,
-        request: { ...request, ...(options.codexJs ? { codexJs: options.codexJs } : {}), ...(options.nodeExecutable ? { nodeExecutable: options.nodeExecutable } : {}) },
+        request: { ...request, ...(options.codexExecutable ? { codexExecutable: options.codexExecutable } : {}), ...(options.codexJs ? { codexJs: options.codexJs } : {}), ...(options.nodeExecutable ? { nodeExecutable: options.nodeExecutable } : {}) },
         resumeSessionId: request.resumeSessionId ?? request.sessionId,
         capabilities: base.capabilities,
       })

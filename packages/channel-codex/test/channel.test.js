@@ -9,6 +9,7 @@ import {
   codexInvocationArgs,
   createCodexChannel,
   CODEX_FIXED_SANDBOX_ARGV,
+  resolveCodexEntry,
 } from '../lib/index.js'
 import {
   AppServerClient,
@@ -77,6 +78,16 @@ test('codex argv supports per-call model and effort', () => {
   ])
 })
 
+test('codex argv supports a native POSIX executable prefix', () => {
+  const argv = codexExecArgv({
+    argvPrefix: ['/opt/homebrew/bin/codex'],
+    cwd: '/Users/test/project',
+    request: {},
+  })
+  assert.deepEqual(argv.slice(0, 4), ['/opt/homebrew/bin/codex', 'exec', '--json', '--skip-git-repo-check'])
+  assert.equal(countOf(argv, BYPASS), 1)
+})
+
 test('codex resume argv uses resume subcommand, stdin prompt, fixed bypass', () => {
   const argv = codexExecResumeArgv({
     node: 'node',
@@ -106,6 +117,62 @@ test('codex resume argv uses resume subcommand, stdin prompt, fixed bypass', () 
 test('codexInvocationArgs validates effort', () => {
   assert.throws(() => codexInvocationArgs({ reasoningEffort: 'impossible' }), /reasoning effort/)
   assert.deepEqual(codexInvocationArgs({}), [])
+})
+
+test('resolveCodexEntry invokes a POSIX/Homebrew launcher directly without resolving node', async () => {
+  const resolved = []
+  const env = makeEnv({
+    subprocess: {
+      async resolveExecutable(name) {
+        resolved.push(name)
+        if (name === 'codex') return '/opt/homebrew/bin/codex'
+        throw new Error(`unexpected executable lookup: ${name}`)
+      },
+      spawn() {
+        throw new Error('spawn not stubbed')
+      },
+    },
+  })
+  const entry = await resolveCodexEntry(env)
+  assert.deepEqual(entry.argvPrefix, ['/opt/homebrew/bin/codex'])
+  assert.equal(entry.executable, '/opt/homebrew/bin/codex')
+  assert.deepEqual(resolved, ['codex'])
+})
+
+test('resolveCodexEntry keeps the Windows npm shim fallback to node + codex.js', async () => {
+  let candidate
+  const env = makeEnv({
+    subprocess: {
+      async resolveExecutable(name) {
+        if (name === 'codex') return 'C:\\fake\\bin\\codex.cmd'
+        if (name === 'node') return 'C:\\fake\\node.exe'
+        throw new Error(`unexpected executable lookup: ${name}`)
+      },
+      spawn() {
+        throw new Error('spawn not stubbed')
+      },
+    },
+    fs: {
+      existsSync(value) {
+        candidate = value
+        return true
+      },
+    },
+    path: path.win32,
+  })
+  const entry = await resolveCodexEntry(env)
+  assert.equal(candidate, 'C:\\fake\\bin\\node_modules\\@openai\\codex\\bin\\codex.js')
+  assert.deepEqual(entry.argvPrefix, ['C:\\fake\\node.exe', candidate])
+})
+
+test('resolveCodexEntry accepts an explicit native executable and rejects ambiguous config', async () => {
+  const env = makeEnv()
+  const entry = await resolveCodexEntry(env, { codexExecutable: '/usr/local/bin/codex' })
+  assert.deepEqual(entry.argvPrefix, ['/usr/local/bin/codex'])
+  await assert.rejects(
+    resolveCodexEntry(env, { codexExecutable: '/usr/local/bin/codex', codexJs: '/tmp/codex.js' }),
+    /not both/,
+  )
 })
 
 test('codex lightweight channel claims run/resume only; app-server channel claims sessions/steer', () => {
@@ -332,6 +399,21 @@ test('app-server handshake sends initialize then initialized notification', asyn
   const methods = captured.stdinWrites.map((l) => JSON.parse(l).method).filter(Boolean)
   assert.ok(methods.includes('initialize'))
   assert.ok(methods.includes('initialized'), 'initialized notification must be sent')
+})
+
+test('app-server accepts a native Codex executable prefix', async () => {
+  const { handle } = makeScriptedSpawn(defaultResponder)
+  let spawnedArgv
+  const client = new AppServerClient({
+    spawn: (argv) => {
+      spawnedArgv = argv
+      return handle
+    },
+    argvPrefix: ['/opt/homebrew/bin/codex'],
+    logger: { info() {}, warn() {}, error() {} },
+  })
+  await client.ensureStarted()
+  assert.deepEqual(spawnedArgv, ['/opt/homebrew/bin/codex', 'app-server'])
 })
 
 test('classifyThreadStatus is honest about notLoaded and external active', () => {

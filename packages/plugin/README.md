@@ -6,6 +6,7 @@
 
 - **Providers**：`coding-agent/codex`、`coding-agent/claude-code`、`coding-agent/grok-build`、按配置生成的 `coding-agent/acp/<name>`
 - **工具**：`subagent_code`、`coding_sessions_list`、`coding_session_read/start/send`、`coding_runs_list`、`coding_run_read/resume/cancel`
-- **渠道配置名**：codex → `nodeExecutable` / `codexJs`；claude-code → `claudeExecutable`（真实二进制，不接受 `.cmd/.ps1`）；grok-build → `grokExecutable`（同上）
+- **渠道配置名**：codex → `codexExecutable`（原生二进制或 POSIX 启动器，跨平台优先）或 `nodeExecutable` + `codexJs`（不可同时配置）；claude-code → `claudeExecutable`（真实二进制，不接受 `.cmd/.ps1`）；grok-build → `grokExecutable`（同上）
+- **平台状态**：Windows 已实机验证；macOS 仅提供兼容性实现，需用户自行测试并通过仓库 Issues 反馈
 - **工具配置**：`roles` / `rolesFile` 提供严格角色；`runRegistryPath` 可覆盖插件自有后台运行登记位置
 - 与旧 `dsh-subagent-codex` 插件可共存（provider 命名不同）

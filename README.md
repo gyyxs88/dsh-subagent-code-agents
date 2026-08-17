@@ -106,6 +106,15 @@ packages/
 
 ## 安装
 
+### 平台状态
+
+| 平台 | 状态 | 说明 |
+| --- | --- | --- |
+| Windows | **支持，已实机验证** | 当前开发、部署和真实渠道验收均在 Windows 上完成。 |
+| macOS | **兼容性预览，未实机验证** | 已支持 POSIX 可执行文件、符号链接及 `/usr/local/bin`、`/opt/homebrew/bin` 等常见 Codex 启动路径，但维护者目前没有 Mac；请用户自行测试并反馈，暂不作为正式支持保证。 |
+
+macOS 用户反馈请提交到 [GitHub Issues](https://github.com/gyyxs88/dsh-subagent-code-agents/issues)，并附上：Mac 芯片与系统版本、Node/DSH/渠道 CLI 版本、脱敏后的渠道配置和完整错误信息。请勿提交登录凭据、API Key 或本地会话内容。
+
 根包 `dsh-subagent-code-agents` 就是公开发行包（**不是** private workspace 根）。`bundleDependencies` 把六个内部 `@dsh-subagent-code-agents/*` 包打进根 tarball，因此安装根 tgz 时不要求内部 scoped 包先发布。
 
 当前内部 scoped 包尚未分别发布到 registry，**不要把 GitHub source archive 直接交给 pnpm 安装**：pnpm 的 Git 依赖封装不会保留 npm `bundleDependencies`。请从仓库生成根 tgz，或使用 Release 中同样由 `npm pack` 生成的 tgz：
@@ -147,7 +156,20 @@ npm pack
   config: { channel: grok-build, providerName: coding-agent/grok-build }
 ```
 
-每行可配置渠道专属 executable：`nodeExecutable` / `codexJs`（codex）、`claudeExecutable`（claude-code，须为真实二进制，不接受 `.cmd/.ps1`）、`grokExecutable`（grok-build，同上）。
+每行可配置渠道专属 executable：`codexExecutable`（codex 原生二进制或 POSIX 启动器，跨平台优先）、`nodeExecutable` + `codexJs`（codex 的 JS 入口兼容配置）、`claudeExecutable`（claude-code，须为真实二进制，不接受 `.cmd/.ps1`）、`grokExecutable`（grok-build，同上）。`codexExecutable` 与 `codexJs` 不可同时设置。
+
+macOS 上若 DSH 的 PATH 没有包含渠道 CLI，可显式填写绝对路径，例如：
+
+```yaml
+- id: coding-agent-codex
+  name: 'dsh-subagent-code-agents'
+  config:
+    channel: codex
+    providerName: coding-agent/codex
+    codexExecutable: '/opt/homebrew/bin/codex' # Intel Mac 常见路径为 /usr/local/bin/codex
+```
+
+此配置只指定启动文件，不代替 CLI 安装或登录；DSH 与渠道 CLI 仍需运行在能够读取对应认证状态的同一 macOS 用户环境中。
 
 ACP 实例按需追加；`id`/`name` 只写实例名，注册后是 `acp/<name>`。命令用无 shell 的 argv 启动，不接受 `.cmd/.ps1/.bat` shim：
 

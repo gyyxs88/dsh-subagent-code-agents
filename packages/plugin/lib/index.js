@@ -32,6 +32,7 @@ export const CHANNEL_FACTORIES = Object.freeze({
   // Codex uses the full app-server adapter (run + resume + sessions + steer).
   codex: (cfg) =>
     createCodexAppServerChannel({
+      codexExecutable: cfg.codexExecutable,
       nodeExecutable: cfg.nodeExecutable,
       codexJs: cfg.codexJs,
       appServerRequestTimeoutMs: cfg.appServerRequestTimeoutMs,
