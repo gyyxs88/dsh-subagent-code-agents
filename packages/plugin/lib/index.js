@@ -23,6 +23,7 @@ import { createCodexChannel } from '@dsh-subagent-code-agents/channel-codex'
 import { createCodexAppServerChannel } from '@dsh-subagent-code-agents/channel-codex/app-server'
 import { createClaudeCodeChannel } from '@dsh-subagent-code-agents/channel-claude-code'
 import { createGrokBuildChannel } from '@dsh-subagent-code-agents/channel-grok-build'
+import { createAcpChannel } from '@dsh-subagent-code-agents/channel-acp'
 
 export const name = 'dsh-subagent-code-agents'
 export const inject = ['subagents', 'subprocess']
@@ -38,6 +39,15 @@ export const CHANNEL_FACTORIES = Object.freeze({
     }),
   'claude-code': (cfg) => createClaudeCodeChannel({ claudeExecutable: cfg.claudeExecutable }),
   'grok-build': (cfg) => createGrokBuildChannel({ grokExecutable: cfg.grokExecutable }),
+  acp: (cfg) => createAcpChannel({
+    id: cfg.id ?? cfg.name,
+    displayName: cfg.displayName,
+    command: cfg.command,
+    args: cfg.args,
+    env: cfg.env,
+    cwd: cfg.cwd,
+    requestTimeoutMs: cfg.requestTimeoutMs,
+  }),
 })
 
 /** Provider name for a channel id: `coding-agent/<id>`. */
@@ -50,7 +60,7 @@ export function runtimeEnvFor(ctx, config = {}) {
   return {
     subprocess: {
       spawn: (spec) => ctx.subprocess.spawn(spec),
-      resolveExecutable: (name) => ctx.subprocess.resolveExecutable(name),
+      resolveExecutable: (name, env, signal) => ctx.subprocess.resolveExecutable(name, env, signal),
     },
     fs,
     path,
@@ -200,14 +210,15 @@ export function createChannelAdapter(config = {}) {
  *     not part of the verified API).
  */
 export function mountChannel(ctx, config = {}) {
-  const channelId = config.channel
-  if (typeof channelId !== 'string' || channelId.length === 0) {
+  const channelType = config.channel
+  if (typeof channelType !== 'string' || channelType.length === 0) {
     ctx.logger.error?.('dsh-subagent-code-agents: row missing `channel`')
     return undefined
   }
-  const providerName = config.providerName ?? providerNameFor(channelId)
   try {
     const channel = createChannelAdapter(config)
+    const channelId = channel.id
+    const providerName = config.providerName ?? providerNameFor(channelId)
     const env = runtimeEnvFor(ctx, config)
     const provider = providerFromChannel(channel, env, providerName)
     const boundAdapter = bindChannelEnv(channel, env)
@@ -265,7 +276,7 @@ export function mountChannel(ctx, config = {}) {
     ctx.logger.info?.(`dsh-subagent-code-agents: registered provider ${providerName}`)
     return { provider, channel, unregister }
   } catch (error) {
-    ctx.logger.error?.(`dsh-subagent-code-agents: channel ${channelId} failed to mount: ${String(error?.message ?? error)}`)
+    ctx.logger.error?.(`dsh-subagent-code-agents: channel ${channelType} failed to mount: ${String(error?.message ?? error)}`)
     return undefined
   }
 }

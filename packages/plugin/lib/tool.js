@@ -1,10 +1,10 @@
 /**
  * dsh-subagent-code-agents — tool layer.
  *
- * Exposes the `subagent_code` delegation tool plus the `coding_sessions_list /
- * coding_session_read / coding_session_start / coding_session_send` session
- * tools. Every tool REQUIRES a `channel` field; channels are looked up in the
- * shared registry (env-bound adapters registered by the provider layer).
+ * Exposes the `subagent_code` delegation tool, session tools, and a small
+ * persistent registry for background runs owned by this plugin. Channels are
+ * looked up in the shared registry (env-bound adapters registered by the
+ * provider layer).
  * Capability gaps produce an explicit structured `unsupported` refusal — never
  * a silent ignore, never a fallback. The legacy `subagent_codex` tool name is
  * intentionally not used.
@@ -12,8 +12,9 @@
 
 import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { settleRun } from '@deepseek-ai/dsh-subagent'
 import { hasCapability, registry, unsupported } from '@dsh-subagent-code-agents/core'
+import { loadRoleRegistry, resolveRoleInvocation } from './roles.js'
+import { defaultRunRegistryPath, jobOutcomeFor, OwnedRunRegistry, sharedOwnedRunRegistry } from './owned-runs.js'
 
 export const name = 'tool-subagent-code-agents'
 export const inject = ['tools', 'subagents']
@@ -21,6 +22,16 @@ export const inject = ['tools', 'subagents']
 export const Config = z.object({
   providerPrefix: z.string().default('coding-agent'),
   enableRunInBackground: z.boolean().default(true),
+  runRegistryPath: z.string(),
+  rolesFile: z.string(),
+  roles: z.array(z.object({
+    id: z.string(),
+    channel: z.string(),
+    model: z.string(),
+    reasoningEffort: z.string(),
+    instructions: z.string(),
+    allowDelegation: z.boolean().default(true),
+  })).default([]),
 })
 
 function outputValueText(values) {
@@ -32,10 +43,22 @@ function outputValueText(values) {
     .join('')
 }
 
-async function settleStart(start, signal) {
+async function settleOwnedStart(start, signal, ownedRuns, runId) {
+  let run
   try {
-    return await settleRun(await start)
+    run = await start
+    const result = await run.result
+    try {
+      await run.dispose()
+    } catch (error) {
+      ownedRuns.fail(runId, `dispose failed: ${String(error)}`, signal.aborted)
+      return { status: 'failed', detail: `dispose failed: ${String(error)}` }
+    }
+    ownedRuns.settle(runId, result)
+    return jobOutcomeFor(result)
   } catch (error) {
+    try { await run?.dispose?.() } catch {}
+    ownedRuns.fail(runId, error, signal.aborted)
     return signal.aborted ? { status: 'killed' } : { status: 'failed', detail: String(error) }
   }
 }
@@ -86,7 +109,72 @@ function clampInt(value, min, max, fallback) {
 export function apply(ctx, config = {}) {
   const providerPrefix = config.providerPrefix ?? 'coding-agent'
   const backgroundEnabled = config.enableRunInBackground !== false
+  const roles = loadRoleRegistry(config)
+  const runRegistryPath = defaultRunRegistryPath(config)
+  const ownedRuns = runRegistryPath ? sharedOwnedRunRegistry({
+    filePath: runRegistryPath,
+    logger: ctx.logger,
+  }) : new OwnedRunRegistry({ logger: ctx.logger })
+  const ownedRunIds = new Set()
   const disposers = []
+
+  const requireJobs = () => {
+    const jobs = ctx.get('jobs')
+    if (jobs === undefined) {
+      throw new Error('background jobs unavailable: load @deepseek-ai/dsh-jobs and @deepseek-ai/dsh-tool-jobs')
+    }
+    return jobs
+  }
+
+  const startOwnedBackground = ({
+    jobs,
+    providerName,
+    request,
+    owner,
+    channel,
+    label,
+    role,
+    model,
+    reasoningEffort,
+    sessionId,
+    resumedFrom,
+  }) => {
+    const record = ownedRuns.create({
+      channel: channel.id,
+      label,
+      role,
+      cwd: request.cwd,
+      model,
+      reasoningEffort,
+      sessionId,
+      resumedFrom,
+    })
+    const controller = new AbortController()
+    ownedRunIds.add(record.id)
+    ownedRuns.attach(record.id, { controller })
+    let jobId
+    try {
+      jobId = jobs.start({
+        kind: 'subagent',
+        label,
+        owner,
+        run: () => ({
+          cancel: (reason) => controller.abort(reason ?? 'background subagent task killed'),
+          done: settleOwnedStart(
+            ctx.subagents.start(providerName, { ...request, signal: controller.signal }),
+            controller.signal,
+            ownedRuns,
+            record.id,
+          ),
+        }),
+      })
+    } catch (error) {
+      ownedRuns.fail(record.id, error)
+      throw error
+    }
+    ownedRuns.setJobId(record.id, jobId)
+    return { kind: 'background', jobId, runId: record.id }
+  }
 
   const mountSubagentCode = () => {
     disposers.push(
@@ -94,15 +182,18 @@ export function apply(ctx, config = {}) {
         defineTool({
           name: 'subagent_code',
           description:
-            'Delegate a self-contained coding task to a coding-agent channel (codex | claude-code | grok-build). channel, description and prompt are required; model/reasoning_effort/resume_session_id are optional per-call overrides.' +
+            'Delegate a self-contained coding task to a registered coding-agent channel. Supply channel directly, or a configured role that fixes the channel and may provide model/effort/instructions. Explicit model/reasoning_effort override role defaults; a role/channel mismatch is rejected.' +
             (backgroundEnabled
               ? ' Set run_in_background to return a job id; collect with job_output and stop with job_kill.'
               : ' The call waits for the result.'),
           parameters: {
             channel: {
               type: 'string',
-              required: true,
-              description: 'Channel id: codex | claude-code | grok-build.',
+              description: 'Registered channel id. Required unless role supplies it.',
+            },
+            role: {
+              type: 'string',
+              description: 'Optional configured role id. Unknown roles and mismatched explicit channels are rejected.',
             },
             description: {
               type: 'string',
@@ -154,15 +245,16 @@ export function apply(ctx, config = {}) {
             if (!exec || !exec.agent) {
               throw new Error('subagent_code requires a calling agent')
             }
-            const channel = channelFor(args, ctx.logger)
+            const invocation = resolveRoleInvocation(args, roles)
+            const channel = channelFor({ channel: invocation.channel }, ctx.logger)
             // Capability gates — explicit refusal, never fallback.
             if (args.resume_session_id !== undefined && !hasCapability(channel, 'resume')) {
               return unsupported(channel.id, 'resume', channel.capabilities)
             }
-            if (args.model !== undefined && !hasCapability(channel, 'modelOverride')) {
+            if (invocation.model !== undefined && !hasCapability(channel, 'modelOverride')) {
               return unsupported(channel.id, 'modelOverride', channel.capabilities)
             }
-            if (args.reasoning_effort !== undefined && !hasCapability(channel, 'effortOverride')) {
+            if (invocation.reasoningEffort !== undefined && !hasCapability(channel, 'effortOverride')) {
               return unsupported(channel.id, 'effortOverride', channel.capabilities)
             }
             if (!hasCapability(channel, 'run')) {
@@ -170,38 +262,28 @@ export function apply(ctx, config = {}) {
             }
             const request = {
               label: args.description,
-              prompt: [{ type: 'text', text: args.prompt }],
+              prompt: [{ type: 'text', text: invocation.prompt }],
               parent: exec.agent,
-              model: args.model,
-              reasoningEffort: args.reasoning_effort,
+              model: invocation.model,
+              reasoningEffort: invocation.reasoningEffort,
               resumeSessionId: args.resume_session_id,
               cwd: parentCwdOf(exec),
             }
             const providerName = `${providerPrefix}/${channel.id}`
             if (args.run_in_background === true) {
               if (!backgroundEnabled) throw new Error('run_in_background is disabled for subagent_code')
-              const jobs = ctx.get('jobs')
-              if (jobs === undefined) {
-                throw new Error('background jobs unavailable: load @deepseek-ai/dsh-jobs and @deepseek-ai/dsh-tool-jobs')
-              }
-              return {
-                kind: 'background',
-                jobId: jobs.start({
-                  kind: 'subagent',
-                  label: args.description,
-                  owner: exec.agent,
-                  run: () => {
-                    const controller = new AbortController()
-                    return {
-                      cancel: (reason) => controller.abort(reason ?? 'background subagent task killed'),
-                      done: settleStart(
-                        ctx.subagents.start(providerName, { ...request, signal: controller.signal }),
-                        controller.signal,
-                      ),
-                    }
-                  },
-                }),
-              }
+              return startOwnedBackground({
+                jobs: requireJobs(),
+                providerName,
+                request,
+                owner: exec.agent,
+                channel,
+                label: args.description,
+                role: invocation.role,
+                model: invocation.model,
+                reasoningEffort: invocation.reasoningEffort,
+                sessionId: args.resume_session_id,
+              })
             }
             const run = await ctx.subagents.start(providerName, { ...request, signal: exec.signal })
             return settleForegroundRun(run)
@@ -324,9 +406,147 @@ export function apply(ctx, config = {}) {
     }
   }
 
+  const mountRunTools = () => {
+    const definitions = {
+      coding_runs_list: {
+        description:
+          'List background coding-agent runs owned by this plugin. Restarted running records are shown as interrupted, never active. continuation is resume_available only when a stored session and a resumable channel both exist.',
+        parameters: {
+          channel: { type: 'string', description: 'Optional exact channel id filter.' },
+          status: { type: 'string', description: 'Optional status filter: running | settled | interrupted.' },
+          limit: { type: 'number', description: 'Maximum rows (default 50, max 100).' },
+        },
+        execute(args) {
+          return ownedRuns.list({
+            channel: args.channel,
+            status: args.status,
+            limit: clampInt(args.limit, 1, 100, 50),
+            channelRegistry: registry,
+          })
+        },
+      },
+      coding_run_read: {
+        description: 'Read one plugin-owned background run record. Prompts are intentionally never persisted.',
+        parameters: {
+          run_id: { type: 'string', required: true, description: 'Owned run id returned by subagent_code.' },
+        },
+        execute(args) {
+          const record = ownedRuns.read(args.run_id, registry)
+          if (!record) throw new Error(`unknown owned run "${args.run_id}"`)
+          return record
+        },
+      },
+      coding_run_resume: {
+        description:
+          'Continue a settled/interrupted plugin-owned run as a NEW background run. Requires a stored session id and current channel resume support; never pretends an old process survived restart.',
+        parameters: {
+          run_id: { type: 'string', required: true, description: 'Prior owned run id.' },
+          prompt: { type: 'string', required: true, description: 'New continuation message; never persisted.' },
+          description: { type: 'string', description: 'Optional short job label.' },
+          model: { type: 'string', description: 'Optional model override for this continuation.' },
+          reasoning_effort: { type: 'string', description: 'Optional reasoning-effort override for this continuation.' },
+        },
+        execute(args, exec) {
+          const previous = ownedRuns.read(args.run_id, registry)
+          if (!previous) throw new Error(`unknown owned run "${args.run_id}"`)
+          if (previous.continuation !== 'resume_available') {
+            return {
+              accepted: false,
+              runId: args.run_id,
+              status: previous.status,
+              continuation: previous.continuation,
+              reason: 'stored run cannot be resumed by the current channel',
+            }
+          }
+          const roleArgs = previous.role
+            ? {
+                role: previous.role,
+                channel: previous.channel,
+                prompt: args.prompt,
+                model: args.model ?? previous.model,
+                reasoning_effort: args.reasoning_effort ?? previous.reasoningEffort,
+              }
+            : {
+                channel: previous.channel,
+                prompt: args.prompt,
+                model: args.model ?? previous.model,
+                reasoning_effort: args.reasoning_effort ?? previous.reasoningEffort,
+              }
+          const invocation = resolveRoleInvocation(roleArgs, roles)
+          const channel = channelFor({ channel: invocation.channel }, ctx.logger)
+          if (!hasCapability(channel, 'resume')) return unsupported(channel.id, 'resume', channel.capabilities)
+          if (invocation.model !== undefined && !hasCapability(channel, 'modelOverride')) {
+            return unsupported(channel.id, 'modelOverride', channel.capabilities)
+          }
+          if (invocation.reasoningEffort !== undefined && !hasCapability(channel, 'effortOverride')) {
+            return unsupported(channel.id, 'effortOverride', channel.capabilities)
+          }
+          const label = args.description ?? `resume ${previous.label}`
+          const request = {
+            label,
+            prompt: [{ type: 'text', text: invocation.prompt }],
+            parent: exec.agent,
+            model: invocation.model,
+            reasoningEffort: invocation.reasoningEffort,
+            resumeSessionId: previous.sessionId,
+            cwd: previous.cwd ?? parentCwdOf(exec),
+          }
+          return startOwnedBackground({
+            jobs: requireJobs(),
+            providerName: `${providerPrefix}/${channel.id}`,
+            request,
+            owner: exec.agent,
+            channel,
+            label,
+            role: invocation.role,
+            model: invocation.model,
+            reasoningEffort: invocation.reasoningEffort,
+            sessionId: previous.sessionId,
+            resumedFrom: previous.id,
+          })
+        },
+      },
+      coding_run_cancel: {
+        description:
+          'Cancel a plugin-owned run only when it is active in this process. Persisted runs from an earlier process are refused explicitly.',
+        parameters: {
+          run_id: { type: 'string', required: true, description: 'Owned run id.' },
+          reason: { type: 'string', description: 'Optional cancellation reason.' },
+        },
+        execute(args) {
+          return ownedRuns.cancel(args.run_id, args.reason)
+        },
+      },
+    }
+    for (const [toolName, def] of Object.entries(definitions)) {
+      disposers.push(
+        ctx.tools.register(
+          defineTool({
+            name: toolName,
+            description: def.description,
+            parameters: def.parameters,
+            output: {
+              schema: { type: 'json' },
+              render: (_args, value) => [
+                { type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value, null, 2) },
+              ],
+            },
+            isConcurrencySafe: () => toolName !== 'coding_run_resume' && toolName !== 'coding_run_cancel',
+            async execute(args, exec) {
+              if (!exec || !exec.agent) throw new Error(`${toolName} requires a calling agent`)
+              return def.execute(args, exec)
+            },
+          }),
+        ),
+      )
+    }
+  }
+
   mountSubagentCode()
   mountSessionTools()
+  mountRunTools()
   ctx.on('dispose', () => {
+    ownedRuns.dispose(ownedRunIds).catch(() => {})
     const fns = disposers.splice(0)
     Promise.allSettled(fns.map((fn) => Promise.resolve().then(() => fn()))).catch(() => {})
   })

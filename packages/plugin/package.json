@@ -1,7 +1,7 @@
 {
   "name": "@dsh-subagent-code-agents/plugin",
   "version": "0.1.0",
-  "description": "Multi-channel coding-agent subagent plugin internals (Codex / Claude Code / Grok Build) — consumed by the root dsh-subagent-code-agents package",
+  "description": "Multi-channel coding-agent subagent plugin internals (Codex / Claude Code / Grok Build / ACP)",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
@@ -26,6 +26,10 @@
     "lib/index.d.ts",
     "lib/tool.js",
     "lib/tool.d.ts",
+    "lib/roles.js",
+    "lib/roles.d.ts",
+    "lib/owned-runs.js",
+    "lib/owned-runs.d.ts",
     "cordis.patch.yml",
     "README.md",
     "LICENSE"
@@ -38,6 +42,7 @@
     "@dsh-subagent-code-agents/channel-codex": "0.1.0",
     "@dsh-subagent-code-agents/channel-claude-code": "0.1.0",
     "@dsh-subagent-code-agents/channel-grok-build": "0.1.0",
+    "@dsh-subagent-code-agents/channel-acp": "0.1.0",
     "@deepseek-ai/schemastery": "^3.18.1"
   },
   "peerDependencies": {
@@ -53,7 +58,8 @@
     "subagent",
     "codex",
     "claude-code",
-    "grok-build"
+    "grok-build",
+    "agent-client-protocol"
   ],
   "engines": {
     "node": ">=24"

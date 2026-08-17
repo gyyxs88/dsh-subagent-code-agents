@@ -13,11 +13,13 @@ const dirs = [
   'packages/channel-codex/lib',
   'packages/channel-claude-code/lib',
   'packages/channel-grok-build/lib',
+  'packages/channel-acp/lib',
   'packages/plugin/lib',
   'packages/core/test',
   'packages/channel-codex/test',
   'packages/channel-claude-code/test',
   'packages/channel-grok-build/test',
+  'packages/channel-acp/test',
   'packages/plugin/test',
 ]
 

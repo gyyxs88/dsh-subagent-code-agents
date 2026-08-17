@@ -37,7 +37,7 @@ export interface ChannelResult {
 export interface RunEnv {
   subprocess: {
     spawn(spec: object): object
-    resolveExecutable(name: string): Promise<string>
+    resolveExecutable(name: string, env?: Record<string, string>, signal?: AbortSignal): Promise<string>
   }
   fs: typeof import('node:fs')
   path: typeof import('node:path')

@@ -18,5 +18,5 @@ export function createChannelAdapter(config?: Record<string, unknown>): CodingAg
 export function mountChannel(
   ctx: Record<string, any>,
   config?: Record<string, unknown>,
-): { provider: unknown; channel: CodingAgentChannel; unregister: () => void } | undefined
+): { provider: unknown; channel: CodingAgentChannel; unregister: () => Promise<void> } | undefined
 export function apply(ctx: Record<string, any>, config?: Record<string, unknown>): { registry: ChannelRegistry; mounted: unknown[] }

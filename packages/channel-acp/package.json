@@ -1,0 +1,36 @@
+{
+  "name": "@dsh-subagent-code-agents/channel-acp",
+  "version": "0.1.0",
+  "description": "Generic Agent Client Protocol channel adapter for dsh-subagent-code-agents",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/index.d.ts",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test --test-isolation=none"
+  },
+  "dependencies": {
+    "@dsh-subagent-code-agents/core": "0.1.0"
+  },
+  "license": "MIT",
+  "keywords": [
+    "agent-client-protocol",
+    "acp",
+    "subagent",
+    "channel"
+  ],
+  "engines": {
+    "node": ">=24"
+  }
+}

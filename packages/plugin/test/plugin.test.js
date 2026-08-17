@@ -162,6 +162,24 @@ test('apply mounts multiple channels from config.channels', () => {
   for (const id of ['codex', 'claude-code', 'grok-build']) registry.unregister(id)
 })
 
+test('multiple ACP rows mount as independent namespaced channels', async () => {
+  const { ctx, state } = makeCtx()
+  const one = mountChannel(ctx, { channel: 'acp', id: 'one', command: 'C:/tools/one-acp.exe' })
+  const two = mountChannel(ctx, { channel: 'acp', id: 'two', command: 'C:/tools/two-acp.exe' })
+  assert.ok(one)
+  assert.ok(two)
+  assert.equal(one.channel.id, 'acp/one')
+  assert.equal(two.channel.id, 'acp/two')
+  assert.deepEqual(
+    state.registeredProviders.map((provider) => provider.name),
+    ['coding-agent/acp/one', 'coding-agent/acp/two'],
+  )
+  assert.ok(registry.has('acp/one'))
+  assert.ok(registry.has('acp/two'))
+  await one.unregister()
+  await two.unregister()
+})
+
 test('unload/reload: dispose unregisters provider, disposes channel, cleans registry; reload works', async () => {
   const { ctx, state } = makeCtx()
   const first = mountChannel(ctx, { channel: 'codex' })
@@ -295,6 +313,10 @@ test('tool layer registers subagent_code and coding_sessions_* tools', () => {
     'coding_session_read',
     'coding_session_start',
     'coding_session_send',
+    'coding_runs_list',
+    'coding_run_read',
+    'coding_run_resume',
+    'coding_run_cancel',
   ]) {
     assert.ok(state.registeredTools.has(n), `${n} must be registered`)
   }
@@ -496,6 +518,124 @@ test('subagent_code end-to-end: tool → provider → channel with correct DSH r
   assert.equal(receivedStart.request.resumeSessionId, 's1')
   assert.equal(receivedStart.name, 'coding-agent/e2e-codex')
   registry.unregister('e2e-codex')
+})
+
+test('subagent_code role supplies channel/instructions and explicit overrides', async () => {
+  const { ctx, state } = makeCtx()
+  let received
+  ctx.subagents.start = async (name, request) => {
+    received = { name, request }
+    return {
+      id: 'role-run',
+      result: Promise.resolve({ stopReason: 'completed', output: [{ type: 'text', text: 'ok' }] }),
+      async dispose() {},
+    }
+  }
+  registry.register({
+    id: 'role-channel',
+    displayName: 'Role Channel',
+    capabilities: { run: true, modelOverride: true, effortOverride: true },
+    async run() {},
+  })
+  applyTool(ctx, {
+    roles: [{
+      id: 'maintainer',
+      channel: 'role-channel',
+      model: 'role-default',
+      reasoningEffort: 'high',
+      instructions: 'Keep the patch minimal.',
+      allowDelegation: false,
+    }],
+  })
+  const result = await state.registeredTools.get('subagent_code').execute(
+    {
+      role: 'maintainer',
+      description: 'fix issue',
+      prompt: 'Implement it.',
+      model: 'explicit-model',
+      reasoning_effort: 'xhigh',
+    },
+    { agent: { id: 'a' }, signal: new AbortController().signal },
+  )
+  assert.equal(result.stopReason, 'completed')
+  assert.equal(received.name, 'coding-agent/role-channel')
+  assert.equal(received.request.model, 'explicit-model')
+  assert.equal(received.request.reasoningEffort, 'xhigh')
+  assert.match(received.request.prompt[0].text, /Keep the patch minimal\./)
+  assert.match(received.request.prompt[0].text, /Do not delegate/)
+  registry.unregister('role-channel')
+})
+
+test('background owned run settles, remains inspectable, and resumes as a linked new run', async () => {
+  const tasks = []
+  let nextJob = 0
+  const jobs = {
+    start(spec) {
+      const task = spec.run()
+      tasks.push(task)
+      return `job-${++nextJob}`
+    },
+  }
+  const { ctx, state } = makeCtx({
+    get(name) { return name === 'jobs' ? jobs : undefined },
+  })
+  const starts = []
+  ctx.subagents.start = async (name, request) => {
+    starts.push({ name, request })
+    return {
+      id: `child-${starts.length}`,
+      result: Promise.resolve({
+        stopReason: 'completed',
+        output: [{ type: 'text', text: `done-${starts.length}` }],
+        sessionId: 'session-owned',
+      }),
+      async dispose() {},
+    }
+  }
+  registry.register({
+    id: 'owned-channel',
+    displayName: 'Owned',
+    capabilities: { run: true, resume: true },
+    async run() {},
+    async resume() {},
+  })
+  applyTool(ctx, {})
+  const started = await state.registeredTools.get('subagent_code').execute(
+    {
+      channel: 'owned-channel',
+      description: 'background work',
+      prompt: 'secret prompt not persisted',
+      run_in_background: true,
+    },
+    { agent: { id: 'owner' }, signal: new AbortController().signal },
+  )
+  assert.equal(started.kind, 'background')
+  assert.equal(started.jobId, 'job-1')
+  assert.match(started.runId, /^run-/)
+  assert.deepEqual(await tasks[0].done, { status: 'completed', output: 'done-1' })
+
+  const read = await state.registeredTools.get('coding_run_read').execute(
+    { run_id: started.runId },
+    { agent: { id: 'owner' } },
+  )
+  assert.equal(read.status, 'settled')
+  assert.equal(read.continuation, 'resume_available')
+  assert.equal(read.sessionId, 'session-owned')
+  assert.ok(!Object.hasOwn(read, 'prompt'))
+
+  const resumed = await state.registeredTools.get('coding_run_resume').execute(
+    { run_id: started.runId, prompt: 'continue now' },
+    { agent: { id: 'owner' } },
+  )
+  assert.equal(resumed.jobId, 'job-2')
+  assert.equal(starts[1].request.resumeSessionId, 'session-owned')
+  assert.deepEqual(await tasks[1].done, { status: 'completed', output: 'done-2' })
+  const resumedRead = await state.registeredTools.get('coding_run_read').execute(
+    { run_id: resumed.runId },
+    { agent: { id: 'owner' } },
+  )
+  assert.equal(resumedRead.resumedFrom, started.runId)
+  registry.unregister('owned-channel')
 })
 
 test('providerFromChannel parses ContentBlock prompt and derives cwd from parent', async () => {

@@ -1,7 +1,7 @@
 /**
  * pack-check.js — reproducible packaging verification.
  *
- * 1. Runs a REAL `npm pack` of each of the five workspace packages into the
+ * 1. Runs a REAL `npm pack` of each workspace package into the
  *    temp dir and asserts the tgz contains the key files (tar -tzf listing
  *    read from disk, no child-pipe capture).
  * 2. Runs a REAL `npm pack` of the ROOT package into the temp dir, creates a
@@ -74,7 +74,20 @@ const WORKSPACE_EXPECT = {
   'packages/channel-codex': ['lib/index.js', 'lib/index.d.ts', 'lib/app-server-channel.js', 'lib/app-server-channel.d.ts', 'LICENSE'],
   'packages/channel-claude-code': ['lib/index.js', 'lib/index.d.ts', 'LICENSE'],
   'packages/channel-grok-build': ['lib/index.js', 'lib/index.d.ts', 'LICENSE'],
-  'packages/plugin': ['lib/index.js', 'lib/index.d.ts', 'lib/tool.js', 'lib/tool.d.ts', 'cordis.patch.yml', 'README.md', 'LICENSE'],
+  'packages/channel-acp': ['lib/index.js', 'lib/index.d.ts', 'LICENSE'],
+  'packages/plugin': [
+    'lib/index.js',
+    'lib/index.d.ts',
+    'lib/tool.js',
+    'lib/tool.d.ts',
+    'lib/roles.js',
+    'lib/roles.d.ts',
+    'lib/owned-runs.js',
+    'lib/owned-runs.d.ts',
+    'cordis.patch.yml',
+    'README.md',
+    'LICENSE',
+  ],
 }
 
 const ROOT_EXPECT = [
@@ -83,6 +96,8 @@ const ROOT_EXPECT = [
   'package/packages/plugin/lib/index.d.ts',
   'package/packages/plugin/lib/tool.js',
   'package/packages/plugin/lib/tool.d.ts',
+  'package/packages/plugin/lib/roles.js',
+  'package/packages/plugin/lib/owned-runs.js',
   'package/packages/plugin/cordis.patch.yml',
   'package/README.md',
   'package/LICENSE',
@@ -247,6 +262,7 @@ function checkRootTarball() {
       '@dsh-subagent-code-agents/channel-codex',
       '@dsh-subagent-code-agents/channel-claude-code',
       '@dsh-subagent-code-agents/channel-grok-build',
+      '@dsh-subagent-code-agents/channel-acp',
       '@dsh-subagent-code-agents/plugin',
     ]
     const nmRoot = path.join(consumer, 'node_modules')

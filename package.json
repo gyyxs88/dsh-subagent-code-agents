@@ -1,7 +1,7 @@
 {
   "name": "dsh-subagent-code-agents",
   "version": "0.1.0",
-  "description": "Multi-channel coding-agent subagent plugin for DeepSeek Harness: Codex, Claude Code and Grok Build behind one Cordis plugin (npm workspaces monorepo, root-installable)",
+  "description": "Multi-channel coding-agent subagent plugin for DeepSeek Harness: Codex, Claude Code, Grok Build and configurable ACP agents",
   "type": "module",
   "main": "packages/plugin/lib/index.js",
   "types": "packages/plugin/lib/index.d.ts",
@@ -26,6 +26,7 @@
     "packages/channel-codex",
     "packages/channel-claude-code",
     "packages/channel-grok-build",
+    "packages/channel-acp",
     "packages/plugin"
   ],
   "scripts": {
@@ -34,6 +35,7 @@
     "test:codex": "node --test --test-isolation=none packages/channel-codex/test/*.test.js",
     "test:claude": "node --test --test-isolation=none packages/channel-claude-code/test/*.test.js",
     "test:grok": "node --test --test-isolation=none packages/channel-grok-build/test/*.test.js",
+    "test:acp": "node --test --test-isolation=none packages/channel-acp/test/*.test.js",
     "test:plugin": "node --test --test-isolation=none packages/plugin/test/*.test.js",
     "check": "node scripts/check.js",
     "pack:check": "node scripts/pack-check.js"
@@ -52,6 +54,7 @@
     "@dsh-subagent-code-agents/channel-codex": "0.1.0",
     "@dsh-subagent-code-agents/channel-claude-code": "0.1.0",
     "@dsh-subagent-code-agents/channel-grok-build": "0.1.0",
+    "@dsh-subagent-code-agents/channel-acp": "0.1.0",
     "@dsh-subagent-code-agents/plugin": "0.1.0",
     "@deepseek-ai/schemastery": "^3.18.1"
   },
@@ -60,6 +63,7 @@
     "@dsh-subagent-code-agents/channel-codex",
     "@dsh-subagent-code-agents/channel-claude-code",
     "@dsh-subagent-code-agents/channel-grok-build",
+    "@dsh-subagent-code-agents/channel-acp",
     "@dsh-subagent-code-agents/plugin"
   ],
   "peerDependencies": {
@@ -75,6 +79,7 @@
     "subagent",
     "codex",
     "claude-code",
-    "grok-build"
+    "grok-build",
+    "agent-client-protocol"
   ]
 }

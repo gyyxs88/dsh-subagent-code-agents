@@ -13,7 +13,7 @@
 # legacy `dsh-subagent-codex` plugin (which registers plain `codex`) — both can
 # be loaded side by side.
 #
-# TOOLS: the `subagent_code` / `coding_sessions_*` tools are contributed by the
+# TOOLS: the `subagent_code` / `coding_sessions_*` / `coding_run*` tools are contributed by the
 # agent-preset entry `dsh-subagent-code-agents/tool` (lib/tool.js). A host
 # bundle patch cannot safely edit every preset, so enable it per preset by
 # adding a tool row inside your preset's agent.cordis.yml, delegation group:
@@ -22,6 +22,8 @@
 #     name: 'dsh-subagent-code-agents/tool'
 #
 # The providers below are inert without that tool row.
+# Additional ACP instances are intentionally opt-in and must be added as
+# separate rows with `channel: acp`, `id`, `command` and optional `args`.
 - insert:
     - id: coding-agent-codex
       name: 'dsh-subagent-code-agents'
