@@ -189,11 +189,11 @@ export function apply(ctx, config = {}) {
           parameters: {
             channel: {
               type: 'string',
-              description: 'Registered channel id. Required unless role supplies it.',
+              description: 'Registered channel id. Required without role; omit it when role supplies the channel. Never put a role id here.',
             },
             role: {
               type: 'string',
-              description: 'Optional configured role id. Unknown roles and mismatched explicit channels are rejected.',
+              description: 'Optional configured role id. When set, normally omit channel; unknown roles and mismatched explicit channels are rejected.',
             },
             description: {
               type: 'string',
@@ -235,7 +235,7 @@ export function apply(ctx, config = {}) {
                   typeof value === 'string'
                     ? value
                     : value?.kind === 'background'
-                      ? `started background subagent task ${value.jobId}`
+                      ? `started background subagent task ${value.jobId} (owned run ${value.runId})`
                       : outputValueText(value?.output) || JSON.stringify(value),
               },
             ],

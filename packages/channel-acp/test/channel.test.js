@@ -116,7 +116,23 @@ test('fresh ACP run performs v1 initialize, session/new and session/prompt', asy
 })
 
 test('ACP resume uses session/load and marks the delivery unmanaged/concurrent', async () => {
-  const handle = makeHandle(standardScript())
+  const standard = standardScript()
+  const handle = makeHandle((message) => {
+    if (message.method === 'session/load') {
+      return [
+        {
+          jsonrpc: '2.0',
+          method: 'session/update',
+          params: {
+            sessionId: message.params.sessionId,
+            update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'old-history' } },
+          },
+        },
+        { jsonrpc: '2.0', id: message.id, result: {} },
+      ]
+    }
+    return standard(message)
+  })
   const channel = createAcpChannel({ id: 'custom', command: 'C:/tools/acp.exe' })
   const result = await channel.resume(
     { prompt: 'continue', cwd: 'C:/workspace', resumeSessionId: 'sess-old' },
@@ -126,6 +142,7 @@ test('ACP resume uses session/load and marks the delivery unmanaged/concurrent',
   assert.equal(result.sessionId, 'sess-old')
   assert.equal(result.delivery, 'resume_unmanaged')
   assert.equal(result.mayBeConcurrent, true)
+  assert.equal(result.output, 'done', 'session/load history replay must not leak into the new prompt output')
   assert.deepEqual(handle.state.writes.map((message) => message.method), [
     'initialize', 'session/load', 'session/prompt',
   ])

@@ -306,7 +306,9 @@ export async function runAcpProcess({ options, env, request, resumeSessionId }) 
   let text = ''
   let sessionId = resumeSessionId
   let abortRequested = false
+  let collectingPromptOutput = false
   const removeUpdate = client.onNotification((method, params) => {
+    if (!collectingPromptOutput) return
     const chunk = extractTextUpdate(method, params, sessionId)
     if (chunk !== undefined) text += chunk
   })
@@ -353,6 +355,7 @@ export async function runAcpProcess({ options, env, request, resumeSessionId }) 
       }
       sessionId = created.sessionId
     }
+    collectingPromptOutput = true
     const result = await client.request('session/prompt', {
       sessionId,
       prompt: [{ type: 'text', text: prompt }],

@@ -627,6 +627,9 @@ test('background owned run settles, remains inspectable, and resumes as a linked
   assert.equal(started.kind, 'background')
   assert.equal(started.jobId, 'job-1')
   assert.match(started.runId, /^run-/)
+  const renderedStart = state.registeredTools.get('subagent_code').output.render({}, started)[0].text
+  assert.match(renderedStart, /job-1/)
+  assert.match(renderedStart, new RegExp(started.runId))
   assert.deepEqual(await tasks[0].done, { status: 'completed', output: 'done-1' })
 
   const read = await state.registeredTools.get('coding_run_read').execute(
