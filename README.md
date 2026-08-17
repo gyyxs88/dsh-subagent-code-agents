@@ -145,9 +145,12 @@ npm pack
 
 > 内部包（`core`、四个 channel 包、`plugin`）位于 `packages/*`，未来也可独立发布、独立维护；但从消费者视角它们被 bundle 进根包，无需单独安装。
 
-`cordis.patch.yml` 自动挂三行 provider（每行独立 executable/config）：
+`cordis.patch.yml` 自动挂一行工具策略和三行 provider（每行独立 executable/config）：
 
 ```yaml
+- id: coding-agent-tools-auto
+  name: 'dsh-subagent-code-agents/auto-tool'
+  config: { excludedPresets: [minimal] }
 - id: coding-agent-codex
   name: 'dsh-subagent-code-agents'
   config: { channel: codex, providerName: coding-agent/codex }
@@ -189,7 +192,9 @@ ACP 实例按需追加；`id`/`name` 只写实例名，注册后是 `acp/<name>`
 
 通用实现依据 ACP stable v1 动态协商：基础生命周期为 `initialize → session/new|load|resume → session/prompt`；可选接入 `session/list`、`session/close`、load 历史回放和 `session/set_config_option`。客户端声明不提供文件系统和终端能力，`mcpServers` 为空；需要这些桥接能力时应由 DSH 侧另行明确设计，而不是隐式开放。协议参考：[ACP TypeScript SDK](https://github.com/agentclientprotocol/typescript-sdk)、[ACP v1 schema](https://github.com/agentclientprotocol/agent-client-protocol/blob/main/schema/v1/schema.json)。
 
-> **工具行**：与旧插件一样，`subagent_code` 与 `coding_sessions_*` 工具由 preset 中的工具行暴露。在会话 preset 的 `agent.cordis.yml` 加入：
+> **模式策略**：bundle 默认把 `subagent_code`、`coding_sessions_*` 与 `coding_run*` 自动挂到所有已组合的 Agent preset，唯独排除 `minimal`。策略监听 Agent 生命周期并使用 Agent 自身作用域，不修改 DSH 内置 preset 文件，因此 DSH 更新后仍可重复部署，自定义 preset 也自动生效。
+>
+> 如果某个 preset 已经手工加入下列工具行（例如需要专属 `roles` 配置），自动策略会识别完整工具集并跳过重复注册，原配置继续生效：
 
 ```yaml
 - id: tool-subagent-code-agents
@@ -203,7 +208,7 @@ ACP 实例按需追加；`id`/`name` 只写实例名，注册后是 `acp/<name>`
 | `subagent_codex`（provider `codex`） | `subagent_code`（`channel: "codex"`，provider `coding-agent/codex`） |
 | `subagent_codex.resume_session_id` | `subagent_code.resume_session_id`（语义一致：`codex exec resume`） |
 | `codex_sessions_list` / `read` / `start` / `send` / `cancel` | `coding_sessions_list` / `coding_session_read` / `coding_session_start` / `coding_session_send` / `coding_session_cancel`（需显式 `channel: "codex"`） |
-| `tool-subagent-codex` 工具行 | `tool-subagent-code-agents` 工具行（需按上文在 preset 中加入；非自动启用） |
+| `tool-subagent-codex` 工具行 | bundle 自动策略（除 `minimal`）；有专属配置时仍可手工使用 `tool-subagent-code-agents` |
 
 固定安全策略不变：codex 始终 `--dangerously-bypass-approvals-and-sandbox`；app-server 始终 `never` + `dangerFullAccess`；`sandboxMode` 配置不存在。
 

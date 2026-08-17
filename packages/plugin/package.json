@@ -14,6 +14,10 @@
       "types": "./lib/tool.d.ts",
       "default": "./lib/tool.js"
     },
+    "./auto-tool": {
+      "types": "./lib/auto-tool.d.ts",
+      "default": "./lib/auto-tool.js"
+    },
     "./package.json": "./package.json"
   },
   "dsh": {
@@ -26,6 +30,8 @@
     "lib/index.d.ts",
     "lib/tool.js",
     "lib/tool.d.ts",
+    "lib/auto-tool.js",
+    "lib/auto-tool.d.ts",
     "lib/roles.js",
     "lib/roles.d.ts",
     "lib/owned-runs.js",

@@ -80,6 +80,8 @@ const WORKSPACE_EXPECT = {
     'lib/index.d.ts',
     'lib/tool.js',
     'lib/tool.d.ts',
+    'lib/auto-tool.js',
+    'lib/auto-tool.d.ts',
     'lib/roles.js',
     'lib/roles.d.ts',
     'lib/owned-runs.js',
@@ -96,6 +98,8 @@ const ROOT_EXPECT = [
   'package/packages/plugin/lib/index.d.ts',
   'package/packages/plugin/lib/tool.js',
   'package/packages/plugin/lib/tool.d.ts',
+  'package/packages/plugin/lib/auto-tool.js',
+  'package/packages/plugin/lib/auto-tool.d.ts',
   'package/packages/plugin/lib/roles.js',
   'package/packages/plugin/lib/owned-runs.js',
   'package/packages/plugin/cordis.patch.yml',
@@ -242,8 +246,10 @@ function checkRootTarball() {
       `
         const a = await import('dsh-subagent-code-agents');
         const b = await import('dsh-subagent-code-agents/tool');
+        const c = await import('dsh-subagent-code-agents/auto-tool');
         console.log('root export apply:', typeof a.apply);
         console.log('tool export apply:', typeof b.apply);
+        console.log('auto-tool export apply:', typeof c.apply);
       `,
     )
     const verify = runInherit([process.execPath, verifyFile], { cwd: consumer })
@@ -252,7 +258,7 @@ function checkRootTarball() {
       console.error('✖ consumer import failed')
       return
     }
-    console.log('✔ consumer imports dsh-subagent-code-agents and /tool OK')
+    console.log('✔ consumer imports dsh-subagent-code-agents, /tool and /auto-tool OK')
 
     // Verify the bundled internal deps physically exist. bundleDependencies
     // are placed under the root package's own node_modules (nested), so check

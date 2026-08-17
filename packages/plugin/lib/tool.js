@@ -19,6 +19,19 @@ import { defaultRunRegistryPath, jobOutcomeFor, OwnedRunRegistry, sharedOwnedRun
 export const name = 'tool-subagent-code-agents'
 export const inject = ['tools', 'subagents']
 
+export const toolNames = Object.freeze([
+  'subagent_code',
+  'coding_sessions_list',
+  'coding_session_read',
+  'coding_session_start',
+  'coding_session_send',
+  'coding_session_cancel',
+  'coding_runs_list',
+  'coding_run_read',
+  'coding_run_resume',
+  'coding_run_cancel',
+])
+
 export const Config = z.object({
   providerPrefix: z.string().default('coding-agent'),
   enableRunInBackground: z.boolean().default(true),
@@ -567,9 +580,14 @@ export function apply(ctx, config = {}) {
   mountSubagentCode()
   mountSessionTools()
   mountRunTools()
-  ctx.on('dispose', () => {
-    ownedRuns.dispose(ownedRunIds).catch(() => {})
+  let disposal
+  const dispose = () => disposal ??= (async () => {
     const fns = disposers.splice(0)
-    Promise.allSettled(fns.map((fn) => Promise.resolve().then(() => fn()))).catch(() => {})
-  })
+    await Promise.allSettled([
+      ownedRuns.dispose(ownedRunIds),
+      ...fns.map((fn) => Promise.resolve().then(() => fn())),
+    ])
+  })()
+  ctx.on('dispose', dispose)
+  return dispose
 }

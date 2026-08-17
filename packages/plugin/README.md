@@ -9,4 +9,5 @@
 - **渠道配置名**：codex → `codexExecutable`（原生二进制或 POSIX 启动器，跨平台优先）或 `nodeExecutable` + `codexJs`（不可同时配置）；claude-code → `claudeExecutable`（真实二进制，不接受 `.cmd/.ps1`，Agent SDK 复用其登录/配置）；grok-build → `grokExecutable`（同上）以及可选 `grokHome`（自定义会话存储目录）
 - **平台状态**：Windows 已实机验证；macOS 仅提供兼容性实现，需用户自行测试并通过仓库 Issues 反馈
 - **工具配置**：`roles` / `rolesFile` 提供严格角色；`runRegistryPath` 可覆盖插件自有后台运行登记位置
+- **模式挂载**：bundle 默认把工具自动挂到所有 Agent preset，唯独排除 `minimal`；已有手工工具行会被识别并保留
 - 与旧 `dsh-subagent-codex` 插件可共存（provider 命名不同）

@@ -14,6 +14,10 @@
       "types": "./packages/plugin/lib/tool.d.ts",
       "default": "./packages/plugin/lib/tool.js"
     },
+    "./auto-tool": {
+      "types": "./packages/plugin/lib/auto-tool.d.ts",
+      "default": "./packages/plugin/lib/auto-tool.js"
+    },
     "./package.json": "./package.json"
   },
   "dsh": {
