@@ -53,7 +53,10 @@ function makeHost(existingAgents = []) {
       debug(message) { logs.debug.push(message) },
       warn(message) { logs.warn.push(message) },
     },
-    agents: { list: () => [...existingAgents] },
+    agents: {
+      list: () => [...existingAgents],
+      get: (id) => existingAgents.find((agent) => agent.id === id),
+    },
     agentPresets: { composedPreset: (agentCtx) => agentCtx.presetId },
     tools: { get: (name, agent) => agent.ctx.tools.get?.(name) ?? agent.tools?.get?.(name) },
     subagents: {},
@@ -121,6 +124,26 @@ test('auto policy mounts existing and newly-created non-minimal agents only', as
   await host.dispose()
   assert.equal(standard.tools.size, 0)
   assert.equal(cordis.tools.size, 0)
+})
+
+test('blank-session preset switches unmount minimal and remount non-minimal', async () => {
+  const fixture = asRuntimeAgent('standard')
+  fixture.agent.id = 'session-switch'
+  const host = makeHost([fixture.agent])
+
+  applyAutoTool(host.ctx)
+  assert.deepEqual([...fixture.tools.keys()].sort(), [...toolNames].sort())
+
+  fixture.agent.ctx.presetId = 'minimal'
+  host.emit('agent-preset/selected', 'session-switch', 'minimal')
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(fixture.tools.size, 0)
+
+  fixture.agent.ctx.presetId = 'cordis'
+  host.emit('agent-preset/selected', 'session-switch', 'cordis')
+  assert.deepEqual([...fixture.tools.keys()].sort(), [...toolNames].sort())
+
+  await host.dispose()
 })
 
 test('manual complete tool row wins and partial conflicts fail closed', () => {

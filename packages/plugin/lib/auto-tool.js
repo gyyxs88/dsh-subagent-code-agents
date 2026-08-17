@@ -36,10 +36,16 @@ export function apply(ctx, config = {}) {
   const mounted = new Map()
   let stopping = false
 
-  const mount = (agent) => {
-    if (stopping || mounted.has(agent)) return false
+  const reconcile = (agent) => {
+    if (stopping) return false
     const presetId = ctx.agentPresets.composedPreset(agent.ctx)
-    if (!presetAllowsAutoTools(presetId, excludedPresets)) return false
+    if (!presetAllowsAutoTools(presetId, excludedPresets)) {
+      const cleanup = mounted.get(agent)
+      mounted.delete(agent)
+      cleanup?.()
+      return false
+    }
+    if (mounted.has(agent)) return false
 
     const existing = visiblePluginTools(ctx, agent)
     if (existing.length > 0) {
@@ -67,7 +73,11 @@ export function apply(ctx, config = {}) {
 
   ctx.effect(() => {
     const stopCreated = ctx.on('agent/created', ({ agent }) => {
-      mount(agent)
+      reconcile(agent)
+    })
+    const stopPresetSelected = ctx.on('agent-preset/selected', (sessionId) => {
+      const agent = ctx.agents.get(sessionId)
+      if (agent !== undefined) reconcile(agent)
     })
     const stopDisposed = ctx.on('agent/disposed', ({ agent }) => {
       const cleanup = mounted.get(agent)
@@ -76,11 +86,12 @@ export function apply(ctx, config = {}) {
     })
 
     // Covers hot-loading the bundle while sessions are already live.
-    for (const agent of ctx.agents.list()) mount(agent)
+    for (const agent of ctx.agents.list()) reconcile(agent)
 
     return async () => {
       stopping = true
       stopCreated()
+      stopPresetSelected()
       stopDisposed()
       const cleanups = [...mounted.values()]
       mounted.clear()

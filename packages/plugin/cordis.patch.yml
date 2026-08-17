@@ -17,7 +17,8 @@
 # `coding_sessions_*` and `coding_run*` to every composed agent preset except
 # `minimal`. It uses agent-scoped effects instead of rewriting DSH's shipped
 # preset files, so the policy survives DSH upgrades and also covers custom
-# presets. A preset that already mounts `dsh-subagent-code-agents/tool` keeps
+# presets. Blank-session preset switches are reconciled in both directions so
+# `minimal` never inherits tools from the default preset. A preset that already mounts `dsh-subagent-code-agents/tool` keeps
 # that explicit configuration; duplicate registration is skipped.
 # Additional ACP instances are intentionally opt-in and must be added as
 # separate rows with `channel: acp`, `id`, `command` and optional `args`.

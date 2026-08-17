@@ -192,7 +192,7 @@ ACP 实例按需追加；`id`/`name` 只写实例名，注册后是 `acp/<name>`
 
 通用实现依据 ACP stable v1 动态协商：基础生命周期为 `initialize → session/new|load|resume → session/prompt`；可选接入 `session/list`、`session/close`、load 历史回放和 `session/set_config_option`。客户端声明不提供文件系统和终端能力，`mcpServers` 为空；需要这些桥接能力时应由 DSH 侧另行明确设计，而不是隐式开放。协议参考：[ACP TypeScript SDK](https://github.com/agentclientprotocol/typescript-sdk)、[ACP v1 schema](https://github.com/agentclientprotocol/agent-client-protocol/blob/main/schema/v1/schema.json)。
 
-> **模式策略**：bundle 默认把 `subagent_code`、`coding_sessions_*` 与 `coding_run*` 自动挂到所有已组合的 Agent preset，唯独排除 `minimal`。策略监听 Agent 生命周期并使用 Agent 自身作用域，不修改 DSH 内置 preset 文件，因此 DSH 更新后仍可重复部署，自定义 preset 也自动生效。
+> **模式策略**：bundle 默认把 `subagent_code`、`coding_sessions_*` 与 `coding_run*` 自动挂到所有已组合的 Agent preset，唯独排除 `minimal`。策略监听 Agent 创建与空白会话的 preset 切换：进入 `minimal` 会卸载，切回其他模式会重新挂载。它使用 Agent 自身作用域，不修改 DSH 内置 preset 文件，因此 DSH 更新后仍可重复部署，自定义 preset 也自动生效。
 >
 > 如果某个 preset 已经手工加入下列工具行（例如需要专属 `roles` 配置），自动策略会识别完整工具集并跳过重复注册，原配置继续生效：
 

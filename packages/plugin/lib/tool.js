@@ -583,9 +583,16 @@ export function apply(ctx, config = {}) {
   let disposal
   const dispose = () => disposal ??= (async () => {
     const fns = disposers.splice(0)
+    const toolDisposals = fns.map((fn) => {
+      try {
+        return fn()
+      } catch (error) {
+        return Promise.reject(error)
+      }
+    })
     await Promise.allSettled([
       ownedRuns.dispose(ownedRunIds),
-      ...fns.map((fn) => Promise.resolve().then(() => fn())),
+      ...toolDisposals,
     ])
   })()
   ctx.on('dispose', dispose)
