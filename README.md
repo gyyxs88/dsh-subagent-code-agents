@@ -106,13 +106,22 @@ packages/
 
 ## 安装
 
-根包 `dsh-subagent-code-agents` 就是公开发行包（**不是** private workspace 根）。`bundleDependencies` 把六个内部 `@dsh-subagent-code-agents/*` 包打进根 tarball；Git 安装的 `prepare` 仅在 workspace 包缺失时物化同一组内部包。因此**直接 GitHub/tarball 安装均可，不要求内部 scoped 包先发布**。GitHub 安装必须允许该仓库自身的 `prepare` 脚本运行；若宿主统一使用 `--ignore-scripts`，请改装 `npm pack` 产生的根 tgz。
+根包 `dsh-subagent-code-agents` 就是公开发行包（**不是** private workspace 根）。`bundleDependencies` 把六个内部 `@dsh-subagent-code-agents/*` 包打进根 tarball，因此安装根 tgz 时不要求内部 scoped 包先发布。
+
+当前内部 scoped 包尚未分别发布到 registry，**不要把 GitHub source archive 直接交给 pnpm 安装**：pnpm 的 Git 依赖封装不会保留 npm `bundleDependencies`。请从仓库生成根 tgz，或使用 Release 中同样由 `npm pack` 生成的 tgz：
+
+```powershell
+git clone https://github.com/gyyxs88/dsh-subagent-code-agents.git
+cd dsh-subagent-code-agents
+npm ci --ignore-scripts
+npm pack
+```
 
 ```jsonc
 // <profile>/package.json
 {
   "dependencies": {
-    "dsh-subagent-code-agents": "github:gyyxs88/dsh-subagent-code-agents#<tag>"
+    "dsh-subagent-code-agents": "file:D:/path/to/dsh-subagent-code-agents-0.1.0.tgz"
   },
   "dsh": {
     "profile": {
