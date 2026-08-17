@@ -483,11 +483,15 @@ test('app-server channel lists sessions with honest delivery + bounded preview',
   }
   const { env } = makeScriptedEnv(responder)
   const channel = createCodexAppServerChannel({ codexJs: 'C:/fake/bin/codex.js' })
-  const { sessions } = await channel.listSessions({ cwd: 'C:/ws', limit: 50 }, env)
+  const result = await channel.listSessions({ cwd: 'C:/ws', limit: 50 }, env)
+  const { sessions } = result
   assert.equal(sessions.length, 2)
   assert.equal(sessions[0].delivery, 'external_or_idle') // not managed
   assert.equal(sessions[1].preview.length <= 200 + '…[truncated]'.length, true)
   assert.equal(sessions[1].steerable, false)
+  assert.equal(Object.hasOwn(sessions[0], 'activeFlags'), false)
+  assert.equal(Object.hasOwn(sessions[0], 'name'), false)
+  assert.deepEqual(JSON.parse(JSON.stringify(result)), result, 'tool output must survive JSON round-trip losslessly')
 })
 
 test('createCodexAppServerChannel run delegates to codex exec with bypass', async () => {

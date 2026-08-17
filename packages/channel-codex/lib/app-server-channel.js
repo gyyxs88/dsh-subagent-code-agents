@@ -471,16 +471,29 @@ function truncate(text, max = MAX_HISTORY_CHARS) {
 
 function summarizeThread(thread) {
   if (!thread || typeof thread !== 'object') return undefined
+  if (typeof thread.id !== 'string' || thread.id.length === 0) return undefined
+  const name = typeof thread.name === 'string' && thread.name ? thread.name : undefined
+  const cwd = typeof thread.cwd === 'string' ? thread.cwd : undefined
+  const source = typeof thread.source === 'string' ? thread.source : undefined
+  const activeFlags = Array.isArray(thread.status?.activeFlags)
+    ? thread.status.activeFlags.filter((flag) => typeof flag === 'string')
+    : undefined
+  const updatedAt = typeof thread.updatedAt === 'number' && Number.isFinite(thread.updatedAt)
+    ? thread.updatedAt
+    : undefined
+  const createdAt = typeof thread.createdAt === 'number' && Number.isFinite(thread.createdAt)
+    ? thread.createdAt
+    : undefined
   return {
-    id: typeof thread.id === 'string' ? thread.id : undefined,
-    name: typeof thread.name === 'string' && thread.name ? thread.name : undefined,
+    id: thread.id,
+    ...(name === undefined ? {} : { name }),
     preview: truncate(typeof thread.preview === 'string' ? thread.preview : '', 200),
-    cwd: typeof thread.cwd === 'string' ? thread.cwd : undefined,
-    source: typeof thread.source === 'string' ? thread.source : undefined,
-    status: thread.status?.type ?? 'notLoaded',
-    activeFlags: Array.isArray(thread.status?.activeFlags) ? thread.status.activeFlags : undefined,
-    updatedAt: typeof thread.updatedAt === 'number' ? thread.updatedAt : undefined,
-    createdAt: typeof thread.createdAt === 'number' ? thread.createdAt : undefined,
+    ...(cwd === undefined ? {} : { cwd }),
+    ...(source === undefined ? {} : { source }),
+    status: typeof thread.status?.type === 'string' ? thread.status.type : 'notLoaded',
+    ...(activeFlags === undefined ? {} : { activeFlags }),
+    ...(updatedAt === undefined ? {} : { updatedAt }),
+    ...(createdAt === undefined ? {} : { createdAt }),
   }
 }
 
