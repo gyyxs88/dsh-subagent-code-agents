@@ -21,6 +21,7 @@ const dirs = [
   'packages/channel-grok-build/test',
   'packages/channel-acp/test',
   'packages/plugin/test',
+  'scripts',
 ]
 
 let failed = 0

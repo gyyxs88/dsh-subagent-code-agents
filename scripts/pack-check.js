@@ -99,6 +99,7 @@ const ROOT_EXPECT = [
   'package/packages/plugin/lib/roles.js',
   'package/packages/plugin/lib/owned-runs.js',
   'package/packages/plugin/cordis.patch.yml',
+  'package/scripts/prepare-git-package.js',
   'package/README.md',
   'package/LICENSE',
 ]

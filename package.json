@@ -30,6 +30,7 @@
     "packages/plugin"
   ],
   "scripts": {
+    "prepare": "node scripts/prepare-git-package.js",
     "test": "node --test --test-isolation=none packages/*/test/*.test.js",
     "test:core": "node --test --test-isolation=none packages/core/test/*.test.js",
     "test:codex": "node --test --test-isolation=none packages/channel-codex/test/*.test.js",
@@ -46,6 +47,7 @@
   "files": [
     "packages/plugin/lib",
     "packages/plugin/cordis.patch.yml",
+    "scripts/prepare-git-package.js",
     "README.md",
     "LICENSE"
   ],

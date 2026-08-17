@@ -106,7 +106,7 @@ packages/
 
 ## 安装
 
-根包 `dsh-subagent-code-agents` 就是公开发行包（**不是** private workspace 根）。`bundleDependencies` 把六个内部 `@dsh-subagent-code-agents/*` 包打进根 tarball，因此**直接 GitHub/tarball 安装即可，不要求内部 scoped 包先发布**。
+根包 `dsh-subagent-code-agents` 就是公开发行包（**不是** private workspace 根）。`bundleDependencies` 把六个内部 `@dsh-subagent-code-agents/*` 包打进根 tarball；Git 安装的 `prepare` 仅在 workspace 包缺失时物化同一组内部包。因此**直接 GitHub/tarball 安装均可，不要求内部 scoped 包先发布**。GitHub 安装必须允许该仓库自身的 `prepare` 脚本运行；若宿主统一使用 `--ignore-scripts`，请改装 `npm pack` 产生的根 tgz。
 
 ```jsonc
 // <profile>/package.json
