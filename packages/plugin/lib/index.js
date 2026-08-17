@@ -293,7 +293,5 @@ export function apply(ctx, config = {}) {
     const result = mountChannel(ctx, row)
     if (result !== undefined) mounted.push(result)
   }
-  ctx.registry = registry
-  ctx.mountedChannels = mounted
   return { registry, mounted }
 }

@@ -162,6 +162,21 @@ test('apply mounts multiple channels from config.channels', () => {
   for (const id of ['codex', 'claude-code', 'grok-build']) registry.unregister(id)
 })
 
+test('apply does not assign undeclared properties onto a strict Cordis context', async () => {
+  const { ctx } = makeCtx()
+  const strictCtx = new Proxy(ctx, {
+    set(target, property, value) {
+      if (!Reflect.has(target, property)) {
+        throw new Error(`cannot set undeclared property ${String(property)}`)
+      }
+      return Reflect.set(target, property, value)
+    },
+  })
+  const result = applyPlugin(strictCtx, { channels: [{ channel: 'grok-build' }] })
+  assert.equal(result.mounted.length, 1)
+  await result.mounted[0].unregister()
+})
+
 test('multiple ACP rows mount as independent namespaced channels', async () => {
   const { ctx, state } = makeCtx()
   const one = mountChannel(ctx, { channel: 'acp', id: 'one', command: 'C:/tools/one-acp.exe' })
