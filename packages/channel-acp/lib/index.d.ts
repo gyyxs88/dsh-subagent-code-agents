@@ -1,4 +1,4 @@
-import type { CodingAgentChannel, RunEnv, RunRequest, ChannelResult } from '@dsh-subagent-code-agents/core'
+import type { CodingAgentChannel, RunEnv, RunRequest, ChannelResult, RuntimeRequirement } from '@dsh-subagent-code-agents/core'
 
 export interface AcpChannelConfig {
   id: string
@@ -8,6 +8,9 @@ export interface AcpChannelConfig {
   env?: Record<string, string>
   cwd?: string
   requestTimeoutMs?: number
+  runtimeId?: string
+  runtimeRequirement?: RuntimeRequirement
+  executionPolicies?: Record<string, boolean>
 }
 
 export class AcpProtocolError extends Error {
@@ -17,7 +20,7 @@ export class AcpProtocolError extends Error {
 }
 
 export class AcpClient {
-  constructor(opts: { handle: unknown; requestTimeoutMs: number; logger?: RunEnv['logger'] })
+  constructor(opts: { handle: unknown; requestTimeoutMs: number; logger?: RunEnv['logger']; approvalHandler?: NonNullable<import('@dsh-subagent-code-agents/core').ChannelExecutionPolicy['approvalHandler']> })
   readonly closed: boolean
   onNotification(listener: (method: string, params: unknown) => void): () => void
   request(method: string, params: unknown): Promise<unknown>

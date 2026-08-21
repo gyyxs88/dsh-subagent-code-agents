@@ -11,17 +11,32 @@
  *   - two-phase handshake: `initialize` request then `initialized` notification
  *   - bidirectional JSON-RPC: id+method messages are server REQUESTS, answered
  *     with an explicit method-not-found error so turns never hang
- *   - thread/start + turn/start ALWAYS use approvalPolicy:"never" +
- *     sandboxPolicy:{type:"dangerFullAccess"}
+ *   - thread/start + turn/start map the inherited execution policy to the
+ *     official Codex approval/sandbox profile; Full Access alone uses never/
+ *     dangerFullAccess.
  *   - turn/steer requires expectedTurnId and only turns started by THIS client
  *     (ownedTurns) are steerable; notLoaded is NEVER auto-loaded.
  */
 
 import { StringDecoder } from 'node:string_decoder'
+import { executionPolicyFor, supportsExecutionPolicy, unsupportedPermissionPolicy } from '@dsh-subagent-code-agents/core'
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000
 const MAX_LINE_BUFFER_BYTES = 4 * 1024 * 1024
 const MAX_PENDING_REQUESTS = 128
+
+function codexAppServerThreadPolicy(policy, cwd) {
+  if (!policy || !['read-only', 'workspace-write', 'danger-full-access'].includes(policy.permission)) throw new Error('channel-codex: execution policy is required')
+  if (policy.permission === 'danger-full-access') return { approvalPolicy: 'never', sandbox: 'danger-full-access' }
+  if (policy.permission === 'workspace-write' && typeof policy.approvalHandler !== 'function') throw new Error('channel-codex: Workspace Write requires the target-session approval handler')
+  return { approvalPolicy: 'on-request', sandbox: policy.permission === 'read-only' ? 'read-only' : 'workspace-write', ...(cwd === undefined ? {} : { cwd }) }
+}
+
+function codexAppServerTurnPolicy(policy, cwd) {
+  if (policy.permission === 'danger-full-access') return { approvalPolicy: 'never', sandboxPolicy: { type: 'dangerFullAccess' } }
+  if (policy.permission === 'workspace-write' && typeof policy.approvalHandler !== 'function') throw new Error('channel-codex: Workspace Write requires the target-session approval handler')
+  return { approvalPolicy: 'on-request', sandboxPolicy: policy.permission === 'read-only' ? { type: 'readOnly' } : { type: 'workspaceWrite', ...(cwd ? { writableRoots: [cwd] } : {}) } }
+}
 
 export const THREAD_STATUS = Object.freeze({
   NOT_LOADED: 'notLoaded',
@@ -61,6 +76,7 @@ export class AppServerClient {
     this._cwd = cwd
     this._requestTimeoutMs = requestTimeoutMs
     this._logger = logger ?? { info() {}, warn() {}, error() {} }
+    this._approvalHandler = undefined
 
     this._handle = undefined
     this._nextId = 1
@@ -185,7 +201,7 @@ export class AppServerClient {
     const hasMethod = typeof msg.method === 'string'
 
     if (hasId && hasMethod) {
-      this._answerServerRequest(msg.id, msg.method)
+      this._answerServerRequest(msg.id, msg.method, msg.params)
     } else if (hasId && 'result' in msg) {
       this._settle(msg.id, msg.result)
     } else if (hasId && msg.error !== undefined) {
@@ -197,7 +213,18 @@ export class AppServerClient {
     }
   }
 
-  _answerServerRequest(id, method) {
+  _answerServerRequest(id, method, params) {
+    if (method.toLowerCase().includes('approval') && typeof this._approvalHandler === 'function') {
+      Promise.resolve(this._approvalHandler({ channel: 'codex', method, params }))
+        .then((decision) => {
+          const line = JSON.stringify({ id, result: decision })
+          try { this._handle.stdin.write(line + '\n') } catch {}
+        })
+        .catch(() => {
+          try { this._handle.stdin.write(`${JSON.stringify({ id, error: { code: -32000, message: 'target-session approval was not granted' } })}\n`) } catch {}
+        })
+      return
+    }
     const line = JSON.stringify({
       id,
       error: { code: -32601, message: `channel-codex does not support server request ${method}` },
@@ -205,6 +232,10 @@ export class AppServerClient {
     try {
       this._handle.stdin.write(line + '\n')
     } catch {}
+  }
+
+  setApprovalHandler(handler) {
+    this._approvalHandler = typeof handler === 'function' ? handler : undefined
   }
 
   _settle(id, result) {
@@ -345,12 +376,11 @@ export class AppServerClient {
     return thread
   }
 
-  async threadStart({ cwd, model } = {}) {
-    const params = {
-      approvalPolicy: 'never',
-      sandbox: 'danger-full-access',
+  async threadStart({ cwd, model, executionPolicy } = {}) {
+    const params = codexAppServerThreadPolicy(executionPolicy, cwd)
+    Object.assign(params, {
       threadSource: 'dsh-subagent-code-agents',
-    }
+    })
     if (cwd !== undefined) params.cwd = cwd
     if (model !== undefined) params.model = model
     const result = await this.request('thread/start', params)
@@ -363,12 +393,8 @@ export class AppServerClient {
     return result
   }
 
-  async threadResume(threadId, { model } = {}) {
-    const params = {
-      threadId,
-      approvalPolicy: 'never',
-      sandbox: 'danger-full-access',
-    }
+  async threadResume(threadId, { model, executionPolicy } = {}) {
+    const params = { threadId, ...codexAppServerThreadPolicy(executionPolicy) }
     if (model !== undefined) params.model = model
     const result = await this.request('thread/resume', params)
     this._markManaged(threadId)
@@ -379,17 +405,12 @@ export class AppServerClient {
     return result
   }
 
-  async turnStart({ threadId, input, model, effort, cwd } = {}) {
+  async turnStart({ threadId, input, model, effort, cwd, executionPolicy } = {}) {
     if (typeof threadId !== 'string') throw new AppServerError(-32602, 'turnStart: threadId is required')
     if (!Array.isArray(input) || input.length === 0) {
       throw new AppServerError(-32602, 'turnStart: input is required')
     }
-    const params = {
-      threadId,
-      input,
-      approvalPolicy: 'never',
-      sandboxPolicy: { type: 'dangerFullAccess' },
-    }
+    const params = { threadId, input, ...codexAppServerTurnPolicy(executionPolicy, cwd) }
     if (model !== undefined) params.model = model
     if (effort !== undefined) params.effort = effort
     if (cwd !== undefined) params.cwd = cwd
@@ -519,8 +540,9 @@ export function createCodexAppServerChannel(options = {}) {
     },
   }
 
-  async function getClient(env) {
+  async function getClient(env, policy = null) {
     if (clientSingleton !== undefined && clientSingleton.initialized) {
+      if (policy) clientSingleton.setApprovalHandler(policy.approvalHandler)
       return clientSingleton
     }
     if (clientSingleton !== undefined && !clientSingleton.closed) {
@@ -546,7 +568,7 @@ export function createCodexAppServerChannel(options = {}) {
       clientOptions.logger = clientOptions.logger ?? env.logger
       clientOptions.cwd = options.cwd ?? env.cwd
     }
-    const client = new AppServerClient(clientOptions)
+    const client = new AppServerClient({ ...clientOptions, approvalHandler: policy?.approvalHandler })
     clientSingleton = client
     try {
       await client.ensureStarted()
@@ -691,8 +713,13 @@ export function createCodexAppServerChannel(options = {}) {
           capabilities: base.capabilities,
         }
       }
-      const client = await getClient(env)
-      const started = await client.threadStart({ cwd: opts.cwd, model })
+      let policy
+      try { policy = executionPolicyFor(opts, env, opts.cwd) } catch (error) {
+        return unsupportedPermissionPolicy('codex', opts?.executionPolicy, base.capabilities, String(error.message ?? error))
+      }
+      if (!supportsExecutionPolicy(base, policy)) return unsupportedPermissionPolicy('codex', policy, base.capabilities)
+      const client = await getClient(env, policy)
+      const started = await client.threadStart({ cwd: opts.cwd, model, executionPolicy: policy })
       const threadId = started?.thread?.id
       if (typeof threadId !== 'string') {
         return {
@@ -709,6 +736,7 @@ export function createCodexAppServerChannel(options = {}) {
         ...(model === undefined ? {} : { model }),
         ...(effort === undefined ? {} : { effort }),
         ...(opts.cwd === undefined ? {} : { cwd: opts.cwd }),
+        executionPolicy: policy,
       })
       return {
         channel: 'codex',
@@ -836,5 +864,6 @@ function emptyCapsForCodex() {
     modelOverride: true,
     effortOverride: true,
     sandboxBypassGuaranteed: true,
+    executionPolicies: { 'read-only': true, 'workspace-write': true, 'danger-full-access': true },
   }
 }

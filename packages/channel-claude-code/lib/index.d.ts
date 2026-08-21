@@ -2,20 +2,21 @@
  * @dsh-subagent-code-agents/channel-claude-code type declarations.
  */
 
-import type { ChannelCapabilities, CodingAgentChannel, RunEnv, RunRequest } from '@dsh-subagent-code-agents/core'
+import type { ChannelCapabilities, ChannelExecutionPolicy, CodingAgentChannel, RunEnv, RunRequest, RuntimeRequirement } from '@dsh-subagent-code-agents/core'
 
 export const CHANNEL_ID: 'claude-code'
 export const CLAUDE_FIXED_PERMISSION_ARGV: readonly ['--permission-mode', 'bypassPermissions']
 
 export function normalizeModel(value: string | undefined): string | undefined
 export function normalizeEffort(value: string | undefined): string | undefined
-export function claudePrintArgv(opts: { argvPrefix: string[]; request: unknown }): string[]
-export function claudeResumeArgv(opts: { argvPrefix: string[]; sessionId: string; request: unknown }): string[]
+export function claudePrintArgv(opts: { argvPrefix: string[]; request: unknown; executionPolicy: ChannelExecutionPolicy }): string[]
+export function claudeResumeArgv(opts: { argvPrefix: string[]; sessionId: string; request: unknown; executionPolicy: ChannelExecutionPolicy }): string[]
 export function resolveClaudeEntry(env: RunEnv, request?: unknown): Promise<{ argvPrefix: string[]; entry: string }>
 export function parseClaudeStreamLine(line: string): { type?: string; sessionId?: string; text?: string; isError?: boolean } | undefined
 export function parseClaudeSessionsJson(text: string): Array<{ id?: string; preview?: string; cwd?: string; updatedAt?: number }>
 export interface ClaudeCodeChannelOptions {
   claudeExecutable?: string
+  runtimeRequirement?: RuntimeRequirement
   managedInitTimeoutMs?: number
   /** Test/embedding override; production loads @anthropic-ai/claude-agent-sdk. */
   sdk?: Record<string, (...args: any[]) => any>

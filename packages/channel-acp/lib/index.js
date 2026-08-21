@@ -9,7 +9,7 @@
  */
 
 import { StringDecoder } from 'node:string_decoder'
-import { emptyCapabilities, registry, tryRegister, unsupported } from '@dsh-subagent-code-agents/core'
+import { emptyCapabilities, executionPolicyFor, registry, supportsExecutionPolicy, tryRegister, unsupported, unsupportedPermissionPolicy } from '@dsh-subagent-code-agents/core'
 
 const PREFIX = 'channel-acp'
 const DEFAULT_REQUEST_TIMEOUT_MS = 10 * 60_000
@@ -84,7 +84,7 @@ function normalizeEnv(value) {
   return out
 }
 
-function acpCapabilities() {
+function acpCapabilities(executionPolicies = {}) {
   return {
     ...emptyCapabilities(),
     run: true,
@@ -99,6 +99,7 @@ function acpCapabilities() {
     modelOverride: true,
     effortOverride: true,
     sandboxBypassGuaranteed: false,
+    executionPolicies: { 'read-only': executionPolicies['read-only'] === true, 'workspace-write': executionPolicies['workspace-write'] === true, 'danger-full-access': executionPolicies['danger-full-access'] === true },
   }
 }
 
@@ -110,28 +111,26 @@ function normalizeTimeout(value) {
   return value
 }
 
-async function resolveCommand(env, command, commandEnv) {
+async function resolveCommand(env, command, commandEnv, runtimeRequirement) {
   if (command.includes('/') || command.includes('\\')) {
     return env.path.isAbsolute(command) ? command : env.path.resolve(command)
   }
-  const resolved = await env.subprocess.resolveExecutable(command, commandEnv, env.signal)
-  if (typeof resolved !== 'string' || resolved.length === 0) {
-    throw new Error(`${PREFIX}: cannot locate executable ${command}`)
+  if (env.runtimeManager?.resolveExecutable) {
+    const resolved = await env.runtimeManager.resolveExecutable(runtimeRequirement ?? env.runtimeRequirement ?? { id: `acp/${command}`, version: env.runtimeVersion, executablePath: command })
+    if (typeof resolved?.executable === 'string' && env.path.isAbsolute(resolved.executable)) return resolved.executable
   }
-  if (/\.(?:cmd|ps1|bat)$/iu.test(resolved)) {
-    throw new Error(`${PREFIX}: ${command} resolves to a shell shim; configure a real executable`)
-  }
-  return resolved
+  throw new Error(`${PREFIX}: runtime manager must provide an absolute ACP executable; PATH resolution is disabled`)
 }
 
 export class AcpClient {
-  constructor({ handle, requestTimeoutMs, logger }) {
+  constructor({ handle, requestTimeoutMs, logger, approvalHandler }) {
     if (!handle?.stdin || !handle?.stdout || typeof handle.done?.then !== 'function') {
       throw new AcpProtocolError(-32000, 'ACP spawn returned an invalid process handle')
     }
     this.handle = handle
     this.requestTimeoutMs = requestTimeoutMs
     this.logger = logger ?? { info() {}, warn() {}, error() {} }
+    this.approvalHandler = approvalHandler
     this.nextId = 1
     this.pending = new Map()
     this.listeners = new Set()
@@ -210,9 +209,13 @@ export class AcpClient {
     const hasId = typeof message.id === 'number' || typeof message.id === 'string'
     const hasMethod = typeof message.method === 'string'
     if (hasId && hasMethod) {
-      this.notifyResponse(message.id, {
-        error: { code: -32601, message: `channel-acp does not support server request ${message.method}` },
-      })
+      if (message.method === 'session/request_permission' && typeof this.approvalHandler === 'function') {
+        Promise.resolve(this.approvalHandler({ channel: 'acp', method: message.method, params: message.params }))
+          .then((result) => this.notifyResponse(message.id, { result }))
+          .catch(() => this.notifyResponse(message.id, { error: { code: -32000, message: 'target-session approval was not granted' } }))
+      } else {
+        this.notifyResponse(message.id, { error: { code: -32601, message: `channel-acp does not support server request ${message.method}` } })
+      }
       return
     }
     if (hasId) {
@@ -240,6 +243,10 @@ export class AcpClient {
         } catch {}
       }
     }
+  }
+
+  setApprovalHandler(handler) {
+    this.approvalHandler = typeof handler === 'function' ? handler : undefined
   }
 
   notifyResponse(id, body) {
@@ -270,7 +277,7 @@ export class AcpClient {
 }
 
 async function openAcpConnection({ options, env, signal }) {
-  const executable = await resolveCommand(env, options.command, options.env)
+  const executable = await resolveCommand(env, options.command, options.env, options.runtimeRequirement)
   const handle = env.subprocess.spawn({
     argv: [executable, ...options.args],
     cwd: options.cwd ?? env.cwd,
@@ -287,6 +294,7 @@ async function openAcpConnection({ options, env, signal }) {
     handle,
     requestTimeoutMs: options.requestTimeoutMs,
     logger: env.logger,
+    approvalHandler: options.approvalHandler,
   })
   let initialized
   try {
@@ -434,7 +442,10 @@ export async function runAcpProcess({ options, env, request, resumeSessionId }) 
   }
   const prompt = typeof request.prompt === 'string' ? request.prompt : ''
   if (!prompt.trim()) throw new Error(`${PREFIX}: prompt is required`)
-  const { client, handle, initialized } = await openAcpConnection({ options: { ...options, cwd }, env, signal: env.signal })
+  const policy = executionPolicyFor(request, env, cwd)
+  const capabilities = acpCapabilities(options.executionPolicies)
+  if (!supportsExecutionPolicy({ capabilities }, policy)) return unsupportedPermissionPolicy(options.id, policy, capabilities, 'ACP agent did not declare the requested permission policy')
+  const { client, handle, initialized } = await openAcpConnection({ options: { ...options, cwd, approvalHandler: policy.approvalHandler }, env, signal: env.signal })
   let text = ''
   let sessionId = resumeSessionId
   let abortRequested = false
@@ -460,7 +471,7 @@ export async function runAcpProcess({ options, env, request, resumeSessionId }) 
   const base = {
     channel: options.id,
     runId: `acp-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
-    capabilities: acpCapabilities(),
+    capabilities,
   }
   try {
     const setup = await setupAcpSession({ client, initialized, cwd, resumeSessionId })
@@ -649,7 +660,7 @@ async function startManagedAcp({ options, env, managed, request }) {
   const base = {
     channel: options.id,
     runId: `acp-managed-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
-    capabilities: acpCapabilities(),
+    capabilities: acpCapabilities(options.executionPolicies),
   }
   let connection
   try {
@@ -658,7 +669,9 @@ async function startManagedAcp({ options, env, managed, request }) {
     if (typeof cwd !== 'string' || cwd.trim() === '') throw new Error('startManagedSession requires cwd')
     if (!prompt.trim()) throw new Error('startManagedSession requires a prompt')
     if (env.signal?.aborted) throw new Error('startManagedSession was aborted before launch')
-    connection = await openAcpConnection({ options: { ...options, cwd }, env })
+    const policy = executionPolicyFor(request, env, cwd)
+    if (!supportsExecutionPolicy({ capabilities: base.capabilities }, policy)) return unsupportedPermissionPolicy(options.id, policy, base.capabilities, 'ACP agent did not declare the requested permission policy')
+    connection = await openAcpConnection({ options: { ...options, cwd, approvalHandler: policy.approvalHandler }, env })
     const { client, handle, initialized } = connection
     const setup = await setupAcpSession({ client, initialized, cwd })
     const sessionId = setup.sessionId
@@ -789,12 +802,15 @@ export function createAcpChannel(config = {}) {
     env: normalizeEnv(config.env),
     cwd: config.cwd,
     requestTimeoutMs: normalizeTimeout(config.requestTimeoutMs),
+    runtimeId: config.runtimeId ?? normalizeAcpChannelId(config.id),
+    runtimeRequirement: config.runtimeRequirement,
+    executionPolicies: config.executionPolicies ?? {},
   }
   const managed = new Map()
   const channel = {
     id: options.id,
     displayName: options.displayName,
-    capabilities: acpCapabilities(),
+    capabilities: acpCapabilities(options.executionPolicies),
     run(request, env) {
       return runAcpProcess({ options, env, request, resumeSessionId: request.resumeSessionId })
     },

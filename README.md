@@ -4,14 +4,14 @@ DeepSeek Harness（DSH）的多渠道编码代理子代理插件：内置 OpenAI
 
 ## 远程项目与运行时部署
 
-本插件是渠道适配器，不负责把 Codex、Claude Code、Grok Build 安装或认证到远端主机。DSH 远程项目采用按项目 Desired State 安装外部 Agent 运行时、默认由本机 Model Gateway 服务 DSH 原生 Agent、第三方登录态留在远端的方案；完整的组件边界、权限继承、安装流程和验收标准见 [`dsh-session-control` 的远程项目架构文档](https://github.com/gyyxs88/dsh-session-control/blob/main/docs/remote-project-architecture.md)。在渠道执行权限策略完成前，固定 bypass 的三个外部渠道不得用于远端 Read Only 或 Workspace Write 项目。
+本插件是渠道适配器，不负责把 Codex、Claude Code、Grok Build 安装或认证到远端主机；远程安装由 `dsh-remote-control` 的受信 Runtime Manager 按项目 Desired State 完成。每个 channel package 的 `package.json` 暴露 machine-readable `dsh.remote.runtime` requirement，启动时从注入的 Runtime Manager 获取已校验的绝对 executable，缺失、未认证、漂移或不兼容均结构化拒绝，不回退到 PATH。第三方登录态只留远端，不读取或复制 `~/.codex`、`~/.claude`、`~/.grok`、Cookie、OAuth token 或 API key。完整组件边界、权限继承、安装流程和验收标准见 [`dsh-session-control` 的远程项目架构文档](https://github.com/gyyxs88/dsh-session-control/blob/main/docs/remote-project-architecture.md)。
 
 ```
 packages/
   core/                    渠道适配器接口 + 注册表 + 统一结果 + Runtime 注入（无 DSH 依赖）
-  channel-codex/           Codex 渠道（exec/resume + app-server 会话，固定绕过审批与沙箱）
-  channel-claude-code/     Claude Agent SDK 渠道（会话读取/托管/取消，固定审批与 sandbox off）
-  channel-grok-build/      Grok Build 渠道（headless + ACP 托管，会话读取，固定审批与 sandbox off）
+  channel-codex/           Codex 渠道（exec/resume + app-server，会按 policy 映射权限）
+  channel-claude-code/     Claude Agent SDK 渠道（会话读取/托管/取消，按 policy 映射 SDK 权限）
+  channel-grok-build/      Grok Build 渠道（headless + ACP 托管，会按 capability 映射权限）
   channel-acp/             通用 ACP v1 客户端（可配置多个 acp/<name> 实例）
   plugin/                  公开包 dsh-subagent-code-agents：cordis.patch.yml + 宿主组合 + 工具
 ```
@@ -36,17 +36,20 @@ packages/
 | cancel API | ✅ | ✅ | ✅ | ✅² |
 | streaming 到 DSH | ❌ | ❌ | ❌ | ❌ |
 | modelOverride / effortOverride | ✅ | ✅ | ✅ | ⚠️³ |
-| **sandboxBypassGuaranteed** | ✅ | ✅ | ✅ | ❌ |
+| **executionPolicies** | 三档 | 三档 | Read Only/Full Access | driver 声明 |
+| **sandboxBypassGuaranteed** | 仅 Full Access | 仅 Full Access | 仅 Full Access | ❌ |
 
 ¹ ACP 的 list 需要 agent 声明 `sessionCapabilities.list`；read 需要 `loadSession=true` 的历史回放。resume 优先使用 `session/load`，也支持稳定的 `sessionCapabilities.resume`；未声明时均显式返回 `unsupported`。² ACP cancel 仅作用于本插件创建并仍持有的 managed 活跃回合，不会尝试取消外部或空闲 session。³ model/effort 通过 session `configOptions` 的 `model` / `thought_level` 类别协商；agent 未提供对应选项或所请求值时显式 `unsupported`。
 
 `streaming 到 DSH` 一行仍是 ❌，指 DSH rc.6 尚未消费第三方 provider 的增量。渠道层已经通过 `RunEnv.onUpdate` 产生 `text-delta`，DSH provider 返回值也附带一个向后兼容、可选且有界的 `updates: AsyncIterable`；rc.6 会忽略这个未知字段，最终 `result` 仍是唯一权威终态，中间增量不会写入父模型上下文。待 DSH 上游把可选 `SubagentRun.updates` 纳入 Service Definition 并增加 UI/远端 Consumer 后，才会把矩阵改为 ✅。
 
-> `sandboxBypassGuaranteed` 是"真实保证"，不是口号：
-> - **codex**：CLI 每次 `--dangerously-bypass-approvals-and-sandbox`；app-server `thread/start`/`turn/start` 固定 `approvalPolicy:"never"` + `sandbox:"danger-full-access"`/`sandboxPolicy:{type:"dangerFullAccess"}` → **true**。
-> - **claude-code**：所有调用经官方 Agent SDK 固定 `permissionMode:'bypassPermissions'` + `allowDangerouslySkipPermissions:true` + `sandbox:{enabled:false}`，初始化若未进入 bypass 模式即 fail-closed → **true**。list/read 使用 SDK 官方 API；managed cancel 仅中断本插件持有的流式输入会话。
-> - **grok-build**：每次 run/resume 固定 `--permission-mode bypassPermissions` + 官方定义为 unrestricted read/write/network 的 `--sandbox off`；managed 使用隔离的 `grok --sandbox off agent --always-approve --no-leader stdio` → **true**。会话列表/读取直接使用 Grok 官方文档定义的 `summary.json` 与 `updates.jsonl`，只读、有界且不会续跑会话。
-> - **ACP**：权限与沙箱由所配置的 ACP agent 决定；通用客户端不虚构保证 → **false**。
+> `sandboxBypassGuaranteed` 只描述 Full Access 路径的真实保证，不是默认策略或安全边界：
+> - **codex**：Full Access 才使用 CLI bypass 或 app-server `never`/`dangerFullAccess`；Read Only/Workspace Write 映射到官方审批与 sandbox profile。
+> - **claude-code**：Full Access 才使用 `bypassPermissions`、`allowDangerouslySkipPermissions` 和 sandbox off；受限模式使用 SDK 正式权限与审批回调，模式漂移 fail closed。
+> - **grok-build**：Full Access 才使用 `--permission-mode bypassPermissions`、`--sandbox off` 和 managed `--always-approve`；Read Only 使用官方只读/严格 sandbox，Workspace Write 当前显式 unsupported。
+> - **ACP**：权限与沙箱由 ACP agent 在初始化中声明并由 channel config 允许；未声明的组合返回 `unsupported-permission-policy`，不伪造统一能力。
+
+`ChannelExecutionPolicy` 必须由目标 Session 继承，至少包含 permission、匹配的 approval owner/mode、workspaceRoot 和可选 target/source session identity。只有 Full Access 的 `full-access-controller` 可使用 bypass/always-approve/sandbox-off；Workspace Write 的人工审批保留在 `target-session`。能力提示不是安全边界，受限模式仍由 DSH 外层 sandbox 兜底。
 
 ## 统一结果
 
@@ -166,7 +169,7 @@ npm pack
   config: { channel: grok-build, providerName: coding-agent/grok-build }
 ```
 
-每行可配置渠道专属 executable：`codexExecutable`（codex 原生二进制或 POSIX 启动器，跨平台优先）、`nodeExecutable` + `codexJs`（codex 的 JS 入口兼容配置）、`claudeExecutable`（claude-code，须为真实二进制，不接受 `.cmd/.ps1`）、`grokExecutable`（grok-build，同上）。Claude Agent SDK 固定指向这个已安装 CLI，因此继续复用用户原有登录和配置；Grok 还可用 `grokHome` 指向自定义的 `GROK_HOME`，供会话列表/读取使用，未配置时遵循 `GROK_HOME` 环境变量，再回退到 `~/.grok`。`codexExecutable` 与 `codexJs` 不可同时设置。
+每行可配置 `runtimeRequirement`、`runtimeManager` 和 `executionPolicy`；正式远程部署优先只传 Runtime Manager 返回的绝对 executable。`codexExecutable`、`claudeExecutable`、`grokExecutable` 仅作为受控的绝对路径注入/测试边界，不触发 PATH 搜索，不能是 `.cmd/.ps1/.bat` shim；`codexExecutable` 与 `codexJs` 不可同时设置。Claude Agent SDK 继续使用远端用户已经完成的官方认证；Grok 的 `grokHome` 只用于远端 session metadata 读取，不得用来把登录目录复制到本机。
 
 macOS 上若 DSH 的 PATH 没有包含渠道 CLI，可显式填写绝对路径，例如：
 
@@ -179,7 +182,7 @@ macOS 上若 DSH 的 PATH 没有包含渠道 CLI，可显式填写绝对路径�
     codexExecutable: '/opt/homebrew/bin/codex' # Intel Mac 常见路径为 /usr/local/bin/codex
 ```
 
-此配置只指定启动文件，不代替 CLI 安装或登录；DSH 与渠道 CLI 仍需运行在能够读取对应认证状态的同一 macOS 用户环境中。
+此配置只指定受控启动文件，不代替 runtime 安装或登录；阶段 C 远程目标是 Linux x86_64，登录状态留在远端用户边界。
 
 ACP 实例按需追加；`id`/`name` 只写实例名，注册后是 `acp/<name>`。命令用无 shell 的 argv 启动，不接受 `.cmd/.ps1/.bat` shim：
 
@@ -192,6 +195,8 @@ ACP 实例按需追加；`id`/`name` 只写实例名，注册后是 `acp/<name>`
     command: 'C:/tools/opencode-acp.exe'
     args: ['--stdio']
     requestTimeoutMs: 30000
+    runtimeRequirement: { id: 'acp/opencode', version: '1.0.0' }
+    executionPolicies: { 'read-only': true, 'danger-full-access': true }
 ```
 
 通用实现依据 ACP stable v1 动态协商：基础生命周期为 `initialize → session/new|load|resume → session/prompt`；可选接入 `session/list`、`session/close`、load 历史回放和 `session/set_config_option`。客户端声明不提供文件系统和终端能力，`mcpServers` 为空；需要这些桥接能力时应由 DSH 侧另行明确设计，而不是隐式开放。协议参考：[ACP TypeScript SDK](https://github.com/agentclientprotocol/typescript-sdk)、[ACP v1 schema](https://github.com/agentclientprotocol/agent-client-protocol/blob/main/schema/v1/schema.json)。
@@ -214,7 +219,7 @@ ACP 实例按需追加；`id`/`name` 只写实例名，注册后是 `acp/<name>`
 | `codex_sessions_list` / `read` / `start` / `send` / `cancel` | `coding_sessions_list` / `coding_session_read` / `coding_session_start` / `coding_session_send` / `coding_session_cancel`（需显式 `channel: "codex"`） |
 | `tool-subagent-codex` 工具行 | bundle 自动策略（除 `minimal`）；有专属配置时仍可手工使用 `tool-subagent-code-agents` |
 
-固定安全策略不变：codex 始终 `--dangerously-bypass-approvals-and-sandbox`；app-server 始终 `never` + `dangerFullAccess`；`sandboxMode` 配置不存在。
+权限策略不再固定 bypass：只有目标 Session 为 Full Access 时 Codex 才使用 `--dangerously-bypass-approvals-and-sandbox` 或 app-server `dangerFullAccess`；Read Only/Workspace Write 按目标 policy 映射官方审批与 sandbox，无法兑现时显式拒绝。
 
 ## 扩展渠道
 
@@ -232,7 +237,7 @@ ACP 实例按需追加；`id`/`name` 只写实例名，注册后是 `acp/<name>`
 
 - **Claude Code / Grok Build 的会话能力（list/read/start/send）为 false**：这两个渠道的 `coding_sessions_*` 工具会显式返回 `unsupported`。渠道包中保留的 `parseClaudeSessionsJson` / `parseGrokSessions` 是**未启用的纯函数占位**——Claude 的官方 JSONL transcript 与会话列表格式、Grok 的 SQLite 会话存储都**未**在本轮实现为可用能力，capability 保持 `false` 是权威状态，不以存在 parser 函数为"已实现"。
 - **ACP 能力按 agent 协商**：支持稳定的 list/load replay/resume/close/configOptions 时启用对应路径；缺失就显式 `unsupported`。managed/cancel 只覆盖本插件持有的进程，进程跨重启仍不存活；真 steer 仍仅限 Codex app-server。
-- **固定 full-access 策略**：codex 固定 `danger-full-access`；Claude Agent SDK 固定 `sandbox.enabled=false`；Grok 固定 `--sandbox off`，三者均为 `sandboxBypassGuaranteed=true`。通用 ACP 仍由外部 agent 决定，保持 `false`。
+- **按请求继承权限策略**：codex、Claude Code 支持三档映射；Grok 当前只声明 Read Only/Full Access；ACP 需要 driver/config 与远端 agent 同时声明对应能力。缺少 policy、Runtime Manager、认证或 capability 时均 fail closed。
 
 ## 相关项目与定位
 

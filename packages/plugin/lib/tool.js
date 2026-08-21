@@ -12,7 +12,7 @@
 
 import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { hasCapability, registry, unsupported } from '@dsh-subagent-code-agents/core'
+import { hasCapability, normalizeExecutionPolicy, registry, unsupported } from '@dsh-subagent-code-agents/core'
 import { loadRoleRegistry, resolveRoleInvocation } from './roles.js'
 import { defaultRunRegistryPath, jobOutcomeFor, OwnedRunRegistry, sharedOwnedRunRegistry } from './owned-runs.js'
 
@@ -110,6 +110,29 @@ function parentCwdOf(exec) {
   const header = session && session.header
   const meta = session && session.meta
   return (header && header.cwd) || (meta && meta.cwd)
+}
+
+function executionPolicyForAgent(exec, request, config) {
+  const resolved = typeof config.executionPolicyResolver === 'function'
+    ? config.executionPolicyResolver({ exec, request })
+    : undefined
+  if (resolved !== undefined) return normalizeExecutionPolicy(resolved, { cwd: request.cwd ?? parentCwdOf(exec) })
+  const agent = exec?.agent
+  const permission = agent?.permission?.preset
+    ?? agent?.session?.permission?.preset
+    ?? agent?.session?.permissionPreset
+    ?? agent?.session?.meta?.permissionPreset
+    ?? agent?.session?.header?.permissionPreset
+  if (permission === undefined) return undefined
+  return normalizeExecutionPolicy({
+    permission,
+    workspaceRoot: request.cwd ?? parentCwdOf(exec),
+    approvalOwner: permission === 'danger-full-access' ? 'full-access-controller' : 'target-session',
+    approvalMode: permission === 'danger-full-access' ? 'controller-fingerprint' : 'target-session',
+    sourceSessionId: agent?.session?.id,
+    targetSessionId: agent?.session?.id,
+    approvalHandler: config.approvalHandler ?? agent?.approvalHandler,
+  }, { cwd: request.cwd ?? parentCwdOf(exec) })
 }
 
 function clampInt(value, min, max, fallback) {
@@ -285,6 +308,7 @@ export function apply(ctx, config = {}, injected = {}) {
               reasoningEffort: invocation.reasoningEffort,
               resumeSessionId: args.resume_session_id,
               cwd: parentCwdOf(exec),
+              executionPolicy: executionPolicyForAgent(exec, { cwd: parentCwdOf(exec) }, config),
             }
             const providerName = `${providerPrefix}/${channel.id}`
             if (args.run_in_background === true) {
@@ -374,6 +398,7 @@ export function apply(ctx, config = {}, injected = {}) {
             prompt: args.prompt,
             model: args.model,
             reasoningEffort: args.reasoning_effort,
+            executionPolicy: executionPolicyForAgent(exec, { cwd: args.cwd ?? parentCwdOf(exec) }, config),
           })
         },
       },
@@ -529,6 +554,7 @@ export function apply(ctx, config = {}, injected = {}) {
             reasoningEffort: invocation.reasoningEffort,
             resumeSessionId: previous.sessionId,
             cwd: previous.cwd ?? parentCwdOf(exec),
+            executionPolicy: executionPolicyForAgent(exec, { cwd: previous.cwd ?? parentCwdOf(exec) }, config),
           }
           return startOwnedBackground({
             jobs: requireJobs(),

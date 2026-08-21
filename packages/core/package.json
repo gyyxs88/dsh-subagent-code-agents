@@ -15,6 +15,7 @@
   "files": [
     "lib/index.js",
     "lib/index.d.ts",
+    "lib/execution-policy.js",
     "LICENSE"
   ],
   "scripts": {

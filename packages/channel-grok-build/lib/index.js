@@ -8,14 +8,14 @@
  *   - `-r/--resume <id>` for stored sessions
  *   - `--cwd` working directory
  *   - long prompts sent via a safe temp prompt file (cleaned up afterwards)
- *   - fixed `--permission-mode bypassPermissions` (exactly once)
- *   - fixed `--sandbox off` (exactly once)
+ *   - Full Access uses `--permission-mode bypassPermissions` and
+ *     `--sandbox off`; restricted modes use official profiles
  *   - bounded session list/read from Grok's documented local session store
  *
  * IMPORTANT sandbox honesty: Grok Build 1.0.3 documents `--sandbox off` as
  * unrestricted read/write/network access. Every run/resume argv therefore
- * carries both approval bypass and explicit sandbox off, and the capability
- * is true only while both fixed arguments remain enforced here.
+ * carries both approval bypass and explicit sandbox off. The capability is
+ * meaningful only for an explicitly inherited Full Access policy.
  *
  * `steerActive` is NOT supported — it would require real active mid-turn
  * steering semantics, which Grok's ACP surface does not currently expose.
@@ -24,7 +24,7 @@
 import os from 'node:os'
 
 import { AcpClient } from '@dsh-subagent-code-agents/channel-acp'
-import { emptyCapabilities, registry, tryRegister } from '@dsh-subagent-code-agents/core'
+import { emptyCapabilities, executionPolicyFor, registry, supportsExecutionPolicy, tryRegister, unsupportedPermissionPolicy } from '@dsh-subagent-code-agents/core'
 
 export const CHANNEL_ID = 'grok-build'
 export const GROK_FIXED_PERMISSION_ARGV = Object.freeze(['--permission-mode', 'bypassPermissions'])
@@ -40,8 +40,16 @@ const MAX_HISTORY_TURNS = 20
 const TRUNC_MARKER = '…[truncated]'
 const DEFAULT_MANAGED_REQUEST_TIMEOUT_MS = 10 * 60_000
 
-function appendFixedRunArgs(argv) {
-  argv.push(...GROK_FIXED_PERMISSION_ARGV, ...GROK_FIXED_SANDBOX_ARGV, '--no-auto-update')
+export function grokExecutionPolicyArgv(policy) {
+  if (!policy || typeof policy.permission !== 'string') throw new Error(`${PREFIX}: execution policy is required`)
+  if (policy.permission === 'danger-full-access') return [...GROK_FIXED_PERMISSION_ARGV, ...GROK_FIXED_SANDBOX_ARGV]
+  if (policy.permission === 'read-only') return ['--permission-mode', 'dontAsk', '--sandbox', 'strict']
+  if (policy.permission === 'workspace-write') return ['--permission-mode', 'ask', '--sandbox', 'workspace']
+  throw new Error(`${PREFIX}: unsupported permission policy ${policy.permission}`)
+}
+
+function appendFixedRunArgs(argv, policy) {
+  argv.push(...grokExecutionPolicyArgv(policy), '--no-auto-update')
 }
 
 function normalizeManagedTimeout(value) {
@@ -71,15 +79,15 @@ export function normalizeEffort(value) {
 
 /**
  * Build the complete `grok -p` argv for a SHORT prompt (rides as the `-p`
- * value). Fixed permission mode exactly once; --no-auto-update disables update
- * checks; per-call model/effort; never a shell.
+ * value). Policy-derived permission arguments and --no-auto-update disable
+ * update checks; per-call model/effort; never a shell.
  */
-export function grokPrintArgv({ grok, cwd, request, prompt }) {
+export function grokPrintArgv({ grok, cwd, request, prompt, executionPolicy }) {
   const argv = [grok, '-p', prompt]
   if (request.model !== undefined) argv.push('-m', request.model)
   if (request.reasoningEffort !== undefined) argv.push('--reasoning-effort', request.reasoningEffort)
   argv.push('--output-format', 'streaming-json')
-  appendFixedRunArgs(argv)
+  appendFixedRunArgs(argv, executionPolicy)
   if (cwd) argv.push('--cwd', cwd)
   return argv
 }
@@ -89,19 +97,19 @@ export function grokPrintArgv({ grok, cwd, request, prompt }) {
  * `--prompt-file <path>`. The `-p/--single` flag is NOT used (the file carries
  * the prompt).
  */
-export function grokPromptFileArgv({ grok, cwd, request, promptFile }) {
+export function grokPromptFileArgv({ grok, cwd, request, promptFile, executionPolicy }) {
   const argv = [grok]
   if (request.model !== undefined) argv.push('-m', request.model)
   if (request.reasoningEffort !== undefined) argv.push('--reasoning-effort', request.reasoningEffort)
   argv.push('--output-format', 'streaming-json')
-  appendFixedRunArgs(argv)
+  appendFixedRunArgs(argv, executionPolicy)
   argv.push('--prompt-file', promptFile)
   if (cwd) argv.push('--cwd', cwd)
   return argv
 }
 
 /** Build the complete `grok -p -r <id>` argv (short prompt). */
-export function grokResumeArgv({ grok, sessionId, cwd, request, prompt }) {
+export function grokResumeArgv({ grok, sessionId, cwd, request, prompt, executionPolicy }) {
   if (typeof sessionId !== 'string' || sessionId.length === 0) {
     throw new Error(`${PREFIX}: resume requires a non-empty session id`)
   }
@@ -109,14 +117,14 @@ export function grokResumeArgv({ grok, sessionId, cwd, request, prompt }) {
   if (request.model !== undefined) argv.push('-m', request.model)
   if (request.reasoningEffort !== undefined) argv.push('--reasoning-effort', request.reasoningEffort)
   argv.push('--output-format', 'streaming-json')
-  appendFixedRunArgs(argv)
+  appendFixedRunArgs(argv, executionPolicy)
   argv.push('--resume', sessionId)
   if (cwd) argv.push('--cwd', cwd)
   return argv
 }
 
 /** Build the complete `grok -r <id>` argv (long prompt via file). */
-export function grokResumePromptFileArgv({ grok, sessionId, cwd, request, promptFile }) {
+export function grokResumePromptFileArgv({ grok, sessionId, cwd, request, promptFile, executionPolicy }) {
   if (typeof sessionId !== 'string' || sessionId.length === 0) {
     throw new Error(`${PREFIX}: resume requires a non-empty session id`)
   }
@@ -124,15 +132,15 @@ export function grokResumePromptFileArgv({ grok, sessionId, cwd, request, prompt
   if (request.model !== undefined) argv.push('-m', request.model)
   if (request.reasoningEffort !== undefined) argv.push('--reasoning-effort', request.reasoningEffort)
   argv.push('--output-format', 'streaming-json')
-  appendFixedRunArgs(argv)
+  appendFixedRunArgs(argv, executionPolicy)
   argv.push('--resume', sessionId, '--prompt-file', promptFile)
   if (cwd) argv.push('--cwd', cwd)
   return argv
 }
 
 /** Build the official isolated `grok agent stdio` managed-session argv. */
-export function grokAgentStdioArgv({ grok, model, reasoningEffort }) {
-  const argv = [grok, ...GROK_FIXED_SANDBOX_ARGV, '--no-auto-update', 'agent', '--always-approve', '--no-leader']
+export function grokAgentStdioArgv({ grok, model, reasoningEffort, executionPolicy }) {
+  const argv = [grok, ...grokExecutionPolicyArgv(executionPolicy), '--no-auto-update', 'agent', ...(executionPolicy.permission === 'danger-full-access' ? ['--always-approve'] : []), '--no-leader']
   if (model !== undefined) argv.push('--model', model)
   if (reasoningEffort !== undefined) argv.push('--reasoning-effort', reasoningEffort)
   argv.push('stdio')
@@ -141,9 +149,12 @@ export function grokAgentStdioArgv({ grok, model, reasoningEffort }) {
 
 /** Resolve the grok executable (native binary; reject shims like .cmd/.ps1). */
 export async function resolveGrok(env, request = {}) {
-  const exe = request.grokExecutable ?? (await env.subprocess.resolveExecutable('grok'))
+  const managed = env.runtimeManager?.resolveExecutable
+    ? await env.runtimeManager.resolveExecutable(request.runtimeRequirement ?? env.runtimeRequirement)
+    : null
+  const exe = managed?.executable ?? request.grokExecutable
   if (typeof exe !== 'string' || exe.length === 0) {
-    throw new Error(`${PREFIX}: cannot locate the grok executable`)
+    throw new Error(`${PREFIX}: Runtime Manager must provide an absolute Grok executable; PATH resolution is disabled`)
   }
   if (/\.(cmd|ps1|bat)$/i.test(exe)) {
     throw new Error(`${PREFIX}: grokExecutable must be a real binary, not a ${exe.match(/\.(cmd|ps1|bat)$/i)[0]} shim`)
@@ -489,13 +500,17 @@ async function startManagedGrok({ env, options, managed, request }) {
     const prompt = typeof request.prompt === 'string' ? request.prompt : ''
     if (!prompt.trim()) throw new Error('startManagedSession requires a prompt')
     if (env.signal?.aborted) throw new Error('startManagedSession was aborted before launch')
+    const policy = executionPolicyFor(request, env, cwd)
+    if (!supportsExecutionPolicy({ capabilities: caps }, policy)) return unsupportedPermissionPolicy(CHANNEL_ID, policy, caps)
+    if (policy.permission === 'workspace-write') return unsupportedPermissionPolicy(CHANNEL_ID, policy, caps, 'Grok ACP has no target-session approval bridge for Workspace Write')
     const model = normalizeModel(request.model)
     const reasoningEffort = normalizeEffort(request.reasoningEffort)
     const grok = await resolveGrok(env, {
       ...(options.grokExecutable ? { grokExecutable: options.grokExecutable } : {}),
+      ...(options.runtimeRequirement ? { runtimeRequirement: options.runtimeRequirement } : {}),
     })
     handle = env.subprocess.spawn({
-      argv: grokAgentStdioArgv({ grok, model, reasoningEffort }),
+      argv: grokAgentStdioArgv({ grok, model, reasoningEffort, executionPolicy: policy }),
       cwd,
       stdio: {
         stdin: 'pipe',
@@ -658,6 +673,10 @@ export function parseGrokStreamLine(line) {
 export async function runGrokProcess({ env, request, resumeSessionId }) {
   const cwd = request.cwd ?? request.parentCwd ?? env.cwd
   if (!cwd) throw new Error(`${PREFIX}: no working directory — set cwd or parentCwd`)
+  const policy = executionPolicyFor(request, env, cwd)
+  const capabilities = grokChannelCapabilities()
+  if (!supportsExecutionPolicy({ capabilities }, policy)) return unsupportedPermissionPolicy(CHANNEL_ID, policy, capabilities)
+  if (policy.permission === 'workspace-write') return unsupportedPermissionPolicy(CHANNEL_ID, policy, capabilities, 'Grok headless mode has no target-session approval bridge for Workspace Write')
   const grok = await resolveGrok(env, request)
   const prompt = typeof request.prompt === 'string' ? request.prompt : ''
   if (!prompt.trim()) throw new Error(`${PREFIX}: prompt is required`)
@@ -673,13 +692,13 @@ export async function runGrokProcess({ env, request, resumeSessionId }) {
     if (promptFile === undefined) {
       argv =
         resumeSessionId === undefined
-          ? grokPrintArgv({ grok, cwd, request: normalizedRequest, prompt })
-          : grokResumeArgv({ grok, sessionId: resumeSessionId, cwd, request: normalizedRequest, prompt })
+          ? grokPrintArgv({ grok, cwd, request: normalizedRequest, prompt, executionPolicy: policy })
+          : grokResumeArgv({ grok, sessionId: resumeSessionId, cwd, request: normalizedRequest, prompt, executionPolicy: policy })
     } else {
       argv =
         resumeSessionId === undefined
-          ? grokPromptFileArgv({ grok, cwd, request: normalizedRequest, promptFile })
-          : grokResumePromptFileArgv({ grok, sessionId: resumeSessionId, cwd, request: normalizedRequest, promptFile })
+          ? grokPromptFileArgv({ grok, cwd, request: normalizedRequest, promptFile, executionPolicy: policy })
+          : grokResumePromptFileArgv({ grok, sessionId: resumeSessionId, cwd, request: normalizedRequest, promptFile, executionPolicy: policy })
     }
   } catch (error) {
     cleanupPromptFile({ fs: env.fs, path: env.path, file: promptFile })
@@ -844,7 +863,8 @@ export function grokChannelCapabilities() {
     streaming: false,
     modelOverride: true,
     effortOverride: true,
-    // Both approval bypass and documented unrestricted sandbox=off are fixed.
+    executionPolicies: { 'read-only': true, 'workspace-write': false, 'danger-full-access': true },
+    // Only Full Access uses always-approve + sandbox off; read-only uses dontAsk + strict sandbox.
     sandboxBypassGuaranteed: true,
   }
 }
@@ -863,14 +883,14 @@ export function createGrokBuildChannel(options = {}) {
     async run(request, env) {
       return runGrokProcess({
         env,
-        request: { ...request, ...(normalizedOptions.grokExecutable ? { grokExecutable: normalizedOptions.grokExecutable } : {}) },
+        request: { ...request, ...(normalizedOptions.grokExecutable ? { grokExecutable: normalizedOptions.grokExecutable } : {}), ...(normalizedOptions.runtimeRequirement ? { runtimeRequirement: normalizedOptions.runtimeRequirement } : {}) },
         resumeSessionId: request.resumeSessionId,
       })
     },
     async resume(request, env) {
       return runGrokProcess({
         env,
-        request: { ...request, ...(normalizedOptions.grokExecutable ? { grokExecutable: normalizedOptions.grokExecutable } : {}) },
+        request: { ...request, ...(normalizedOptions.grokExecutable ? { grokExecutable: normalizedOptions.grokExecutable } : {}), ...(normalizedOptions.runtimeRequirement ? { runtimeRequirement: normalizedOptions.runtimeRequirement } : {}) },
         resumeSessionId: request.resumeSessionId ?? request.sessionId,
       })
     },

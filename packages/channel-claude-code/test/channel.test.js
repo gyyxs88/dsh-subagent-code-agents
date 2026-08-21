@@ -6,6 +6,7 @@ import test from 'node:test'
 
 import {
   claudePrintArgv,
+  claudeExecutionPolicyArgv,
   claudeResumeArgv,
   createClaudeCodeChannel,
   normalizeEffort,
@@ -14,6 +15,13 @@ import {
   resolveClaudeEntry,
 } from '../lib/index.js'
 import { unsupported } from '@dsh-subagent-code-agents/core'
+
+const FULL_ACCESS_POLICY = Object.freeze({
+  permission: 'danger-full-access',
+  approvalOwner: 'full-access-controller',
+  approvalMode: 'controller-fingerprint',
+  workspaceRoot: 'C:/ws',
+})
 
 function makeEnv(overrides = {}) {
   return {
@@ -30,12 +38,13 @@ function makeEnv(overrides = {}) {
     path,
     logger: { info() {}, warn() {}, error() {} },
     cwd: 'C:/ws',
+    executionPolicy: FULL_ACCESS_POLICY,
     ...overrides,
   }
 }
 
 test('claudePrintArgv is safe argv (no shell), fixed permission exactly once', () => {
-  const argv = claudePrintArgv({ argvPrefix: ['claude.exe'], request: {} })
+  const argv = claudePrintArgv({ argvPrefix: ['claude.exe'], request: {}, executionPolicy: FULL_ACCESS_POLICY })
   assert.equal(argv[0], 'claude.exe')
   assert.ok(argv.includes('-p'))
   assert.ok(argv.includes('--output-format'))
@@ -46,10 +55,15 @@ test('claudePrintArgv is safe argv (no shell), fixed permission exactly once', (
   assert.ok(!argv.includes('--cwd'), 'working dir comes from spawn cwd, not a --cwd flag')
 })
 
+test('Claude restricted policies map to official modes instead of bypass', () => {
+  assert.deepEqual(claudeExecutionPolicyArgv({ permission: 'read-only' }), ['--permission-mode', 'plan'])
+  assert.deepEqual(claudeExecutionPolicyArgv({ permission: 'workspace-write' }), ['--permission-mode', 'default'])
+})
+
 test('claudePrintArgv supports per-call model and effort', () => {
   const argv = claudePrintArgv({
     argvPrefix: ['node', 'cli.js'],
-    request: { model: 'claude-opus-4', reasoningEffort: 'high' },
+    request: { model: 'claude-opus-4', reasoningEffort: 'high' }, executionPolicy: FULL_ACCESS_POLICY,
   })
   assert.deepEqual(argv.slice(0, 2), ['node', 'cli.js'])
   assert.ok(argv.includes('--model'))
@@ -59,12 +73,12 @@ test('claudePrintArgv supports per-call model and effort', () => {
 })
 
 test('claudeResumeArgv carries resume id and fixed permission', () => {
-  const argv = claudeResumeArgv({ argvPrefix: ['claude.exe'], sessionId: 'abc-123', request: {} })
+  const argv = claudeResumeArgv({ argvPrefix: ['claude.exe'], sessionId: 'abc-123', request: {}, executionPolicy: FULL_ACCESS_POLICY })
   assert.ok(argv.includes('--resume'))
   assert.ok(argv.includes('abc-123'))
   assert.equal(argv.filter((a) => a === 'bypassPermissions').length, 1)
   assert.throws(
-    () => claudeResumeArgv({ argvPrefix: ['claude.exe'], sessionId: '', request: {} }),
+    () => claudeResumeArgv({ argvPrefix: ['claude.exe'], sessionId: '', request: {}, executionPolicy: FULL_ACCESS_POLICY }),
     /non-empty session id/,
   )
 })
@@ -89,50 +103,15 @@ test('parseClaudeStreamLine extracts session id, assistant blocks and result tex
   assert.equal(parseClaudeStreamLine(''), undefined)
 })
 
-test('resolveClaudeEntry prefers native bin/claude.exe next to a .cmd shim', async () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-native-test-'))
-  try {
-    const bin = path.join(tmp, 'bin')
-    const pkg = path.join(bin, 'node_modules', '@anthropic-ai', 'claude-code', 'bin')
-    fs.mkdirSync(pkg, { recursive: true })
-    fs.writeFileSync(path.join(pkg, 'claude.exe'), 'native')
-    fs.writeFileSync(path.join(bin, 'claude.cmd'), '@echo off')
-    const env = makeEnv({
-      subprocess: {
-        async resolveExecutable(name) {
-          if (name === 'node') return 'C:/fake/node.exe'
-          return path.join(bin, 'claude.cmd')
-        },
-      },
-    })
-    const spec = await resolveClaudeEntry(env, {})
-    assert.deepEqual(spec.argvPrefix, [path.join(pkg, 'claude.exe')])
-  } finally {
-    fs.rmSync(tmp, { recursive: true, force: true })
-  }
+test('resolveClaudeEntry uses the injected absolute Runtime Manager executable', async () => {
+  const env = makeEnv({ runtimeManager: { async resolveExecutable() { return { executable: '/opt/claude/bin/claude', state: 'installed-auth-unverified' } } } })
+  const spec = await resolveClaudeEntry(env, { runtimeRequirement: { id: 'claude-code', version: '1.0.0' } })
+  assert.deepEqual(spec.argvPrefix, ['/opt/claude/bin/claude'])
 })
 
-test('resolveClaudeEntry uses node+cli.js for legacy JS layouts', async () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-js-test-'))
-  try {
-    const bin = path.join(tmp, 'bin')
-    const pkg = path.join(bin, 'node_modules', '@anthropic-ai', 'claude-code')
-    fs.mkdirSync(pkg, { recursive: true })
-    fs.writeFileSync(path.join(pkg, 'cli.js'), 'legacy')
-    fs.writeFileSync(path.join(bin, 'claude.cmd'), '@echo off')
-    const env = makeEnv({
-      subprocess: {
-        async resolveExecutable(name) {
-          if (name === 'node') return 'C:/fake/node.exe'
-          return path.join(bin, 'claude.cmd')
-        },
-      },
-    })
-    const spec = await resolveClaudeEntry(env, {})
-    assert.deepEqual(spec.argvPrefix, ['C:/fake/node.exe', path.join(pkg, 'cli.js')])
-  } finally {
-    fs.rmSync(tmp, { recursive: true, force: true })
-  }
+test('resolveClaudeEntry refuses PATH and shell-shim discovery without Runtime Manager', async () => {
+  const env = makeEnv({ subprocess: { async resolveExecutable() { return 'C:/fake/bin/claude.cmd' } } })
+  await assert.rejects(resolveClaudeEntry(env, {}), /Runtime Manager.*PATH resolution is disabled/)
 })
 
 test('resolveClaudeEntry refuses a bare .cmd shim with no adjacent binary', async () => {
@@ -147,7 +126,7 @@ test('resolveClaudeEntry refuses a bare .cmd shim with no adjacent binary', asyn
         },
       },
     })
-    await assert.rejects(resolveClaudeEntry(env, {}), /shim.*claudeExecutable/)
+    await assert.rejects(resolveClaudeEntry(env, {}), /Runtime Manager.*PATH resolution is disabled/)
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true })
   }
@@ -265,7 +244,7 @@ test('SDK run treats error result as error and fails closed on permission policy
   })
   const drifted = await drift.run({ prompt: 'hi', cwd: 'C:/ws' }, env)
   assert.equal(drifted.stopReason, 'error')
-  assert.match(drifted.output, /did not enter bypassPermissions/)
+  assert.match(drifted.output, /did not enter the requested permission mode bypassPermissions/)
 })
 
 test('SDK resume passes session id and marks resume unmanaged/concurrent', async () => {

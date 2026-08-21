@@ -34,13 +34,13 @@
     "packages/plugin"
   ],
   "scripts": {
-    "test": "node --test --test-isolation=none packages/*/test/*.test.js",
-    "test:core": "node --test --test-isolation=none packages/core/test/*.test.js",
-    "test:codex": "node --test --test-isolation=none packages/channel-codex/test/*.test.js",
-    "test:claude": "node --test --test-isolation=none packages/channel-claude-code/test/*.test.js",
-    "test:grok": "node --test --test-isolation=none packages/channel-grok-build/test/*.test.js",
-    "test:acp": "node --test --test-isolation=none packages/channel-acp/test/*.test.js",
-    "test:plugin": "node --test --test-isolation=none packages/plugin/test/*.test.js",
+    "test": "node --test --experimental-test-isolation=none packages/*/test/*.test.js",
+    "test:core": "node --test --experimental-test-isolation=none packages/core/test/*.test.js",
+    "test:codex": "node --test --experimental-test-isolation=none packages/channel-codex/test/*.test.js",
+    "test:claude": "node --test --experimental-test-isolation=none packages/channel-claude-code/test/*.test.js",
+    "test:grok": "node --test --experimental-test-isolation=none packages/channel-grok-build/test/*.test.js",
+    "test:acp": "node --test --experimental-test-isolation=none packages/channel-acp/test/*.test.js",
+    "test:plugin": "node --test --experimental-test-isolation=none packages/plugin/test/*.test.js",
     "check": "node scripts/check.js",
     "pack:check": "node scripts/pack-check.js"
   },

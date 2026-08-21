@@ -8,17 +8,26 @@
  *   - `--resume <id>` / `--session-id <id>` for stored sessions
  *   - official listSessions / getSessionMessages read-only APIs
  *   - streaming-input managed sessions with owned-only interrupt/cancel
- *   - fixed `permissionMode: bypassPermissions`, explicit opt-in, and
- *     `sandbox.enabled: false` on every SDK query
+ *   - Full Access maps to `permissionMode: bypassPermissions` and
+ *     `sandbox.enabled: false`; restricted modes use official SDK permissions
+ *     and approval callbacks
  *
  * Claude Code exposes interrupt, not a true mid-turn steer primitive, so
  * steerActive remains unsupported and is refused explicitly.
  */
 
-import { emptyCapabilities, registry, tryRegister } from '@dsh-subagent-code-agents/core'
+import { emptyCapabilities, executionPolicyFor, registry, supportsExecutionPolicy, tryRegister, unsupportedPermissionPolicy } from '@dsh-subagent-code-agents/core'
 
 export const CHANNEL_ID = 'claude-code'
 export const CLAUDE_FIXED_PERMISSION_ARGV = Object.freeze(['--permission-mode', 'bypassPermissions'])
+
+export function claudeExecutionPolicyArgv(policy) {
+  if (!policy || typeof policy.permission !== 'string') throw new Error(`${PREFIX}: execution policy is required`)
+  if (policy.permission === 'danger-full-access') return [...CLAUDE_FIXED_PERMISSION_ARGV]
+  if (policy.permission === 'read-only') return ['--permission-mode', 'plan']
+  if (policy.permission === 'workspace-write') return ['--permission-mode', 'default']
+  throw new Error(`${PREFIX}: unsupported permission policy ${policy.permission}`)
+}
 
 const PREFIX = 'channel-claude-code'
 const MAX_HISTORY_CHARS = 12_000
@@ -51,10 +60,10 @@ export function normalizeEffort(value) {
 }
 
 /**
- * Build the complete `claude -p` argv. Always uses the fixed permission mode
- * exactly once; per-call model/effort appended; never a shell.
+ * Build the complete `claude -p` argv from the inherited policy; per-call
+ * model/effort are appended and the process is never started through a shell.
  */
-export function claudePrintArgv({ argvPrefix, request }) {
+export function claudePrintArgv({ argvPrefix, request, executionPolicy }) {
   const argv = [...argvPrefix]
   if (request.model !== undefined) argv.push('--model', request.model)
   if (request.reasoningEffort !== undefined) argv.push('--effort', request.reasoningEffort)
@@ -63,8 +72,7 @@ export function claudePrintArgv({ argvPrefix, request }) {
     '--output-format',
     'stream-json',
     '--verbose',
-    '--permission-mode',
-    'bypassPermissions',
+    ...claudeExecutionPolicyArgv(executionPolicy),
   )
   return argv
 }
@@ -74,7 +82,7 @@ export function claudePrintArgv({ argvPrefix, request }) {
  * on the command line here — the channel sends it via stdin to keep argv free
  * of prompt-length limits and shell interpretation.
  */
-export function claudeResumeArgv({ argvPrefix, sessionId, request }) {
+export function claudeResumeArgv({ argvPrefix, sessionId, request, executionPolicy }) {
   if (typeof sessionId !== 'string' || sessionId.length === 0) {
     throw new Error(`${PREFIX}: resume requires a non-empty session id`)
   }
@@ -86,8 +94,7 @@ export function claudeResumeArgv({ argvPrefix, sessionId, request }) {
     '--output-format',
     'stream-json',
     '--verbose',
-    '--permission-mode',
-    'bypassPermissions',
+    ...claudeExecutionPolicyArgv(executionPolicy),
     '--resume',
     sessionId,
   )
@@ -102,6 +109,11 @@ export function claudeResumeArgv({ argvPrefix, sessionId, request }) {
  * `request.claudeExecutable` wins when provided.
  */
 export async function resolveClaudeEntry(env, request = {}) {
+  if (env.runtimeManager?.resolveExecutable) {
+    const resolved = await env.runtimeManager.resolveExecutable(request.runtimeRequirement ?? env.runtimeRequirement)
+    if (typeof resolved?.executable !== 'string' || resolved.executable.length === 0) throw new Error(`${PREFIX}: Runtime Manager returned no absolute Claude executable`)
+    return { argvPrefix: [resolved.executable], entry: resolved.executable, runtimeState: resolved.state }
+  }
   if (request.claudeExecutable) {
     if (/\.(cmd|ps1|bat)$/i.test(request.claudeExecutable)) {
       throw new Error(
@@ -110,31 +122,7 @@ export async function resolveClaudeEntry(env, request = {}) {
     }
     return { argvPrefix: [request.claudeExecutable], entry: request.claudeExecutable }
   }
-  const shim = await env.subprocess.resolveExecutable('claude')
-  if (typeof shim !== 'string' || shim.length === 0) {
-    throw new Error(`${PREFIX}: cannot locate the claude executable`)
-  }
-  const isShim = /\.(cmd|ps1|bat)$/i.test(shim)
-  const sep = Math.max(shim.lastIndexOf('\\'), shim.lastIndexOf('/'))
-  const dir = sep >= 0 ? shim.slice(0, sep) : ''
-  if (dir) {
-    const native = env.path.join(dir, 'node_modules', '@anthropic-ai', 'claude-code', 'bin', 'claude.exe')
-    if (env.fs.existsSync(native)) {
-      return { argvPrefix: [native], entry: native }
-    }
-    const cliJs = env.path.join(dir, 'node_modules', '@anthropic-ai', 'claude-code', 'cli.js')
-    if (env.fs.existsSync(cliJs)) {
-      const node = await env.subprocess.resolveExecutable('node')
-      return { argvPrefix: [node, cliJs], entry: cliJs }
-    }
-  }
-  if (isShim) {
-    // Do NOT spawn a .cmd/.ps1 shim; the real binary must be locatable.
-    throw new Error(
-      `${PREFIX}: claude resolves to a shim (${shim}) but no native bin/claude.exe or cli.js was found next to it; set claudeExecutable explicitly`,
-    )
-  }
-  return { argvPrefix: [shim], entry: shim }
+  throw new Error(`${PREFIX}: Runtime Manager must provide an absolute Claude executable; PATH resolution is disabled`)
 }
 
 /**
@@ -198,11 +186,15 @@ export async function runClaudeProcess({ env, request, resumeSessionId }) {
   const model = normalizeModel(request.model)
   const effort = normalizeEffort(request.reasoningEffort)
   const normalizedRequest = { ...request, model, reasoningEffort: effort }
+  const policy = executionPolicyFor(normalizedRequest, env, cwd)
+  const capabilities = claudeChannelCapabilities()
+  if (!supportsExecutionPolicy({ capabilities }, policy)) return unsupportedPermissionPolicy(CHANNEL_ID, policy, capabilities)
+  if (policy.permission === 'workspace-write' && typeof policy.approvalHandler !== 'function') return unsupportedPermissionPolicy(CHANNEL_ID, policy, capabilities, 'Claude CLI has no target-session approval bridge for Workspace Write')
   const { argvPrefix } = await resolveClaudeEntry(env, request)
   const argv =
     resumeSessionId === undefined
-      ? claudePrintArgv({ argvPrefix, request: normalizedRequest })
-      : claudeResumeArgv({ argvPrefix, sessionId: resumeSessionId, request: normalizedRequest })
+      ? claudePrintArgv({ argvPrefix, request: normalizedRequest, executionPolicy: policy })
+      : claudeResumeArgv({ argvPrefix, sessionId: resumeSessionId, request: normalizedRequest, executionPolicy: policy })
   const prompt = typeof request.prompt === 'string' ? request.prompt : ''
   if (!prompt.trim()) throw new Error(`${PREFIX}: prompt is required`)
 
@@ -343,14 +335,13 @@ function partialTextFromSdkMessage(message) {
   return typeof event.delta.text === 'string' ? event.delta.text : undefined
 }
 
-function assertSdkInitPolicy(message) {
+function assertSdkInitPolicy(message, policy) {
   if (message?.type !== 'system' || message.subtype !== 'init') return
-  if (message.permissionMode !== 'bypassPermissions') {
-    throw new Error(`${PREFIX}: Claude Code did not enter bypassPermissions mode`)
-  }
+  const expected = policy.permission === 'danger-full-access' ? 'bypassPermissions' : policy.permission === 'read-only' ? 'plan' : 'default'
+  if (message.permissionMode !== expected) throw new Error(`${PREFIX}: Claude Code did not enter the requested permission mode ${expected}`)
 }
 
-/** Build the fixed Agent SDK options for one call. */
+/** Build policy-derived Agent SDK options for one call. */
 export async function claudeSdkOptions({ env, options, request, resumeSessionId, abortController }) {
   const cwd = request.cwd ?? request.parentCwd ?? env.cwd
   if (typeof cwd !== 'string' || cwd.trim() === '') {
@@ -358,8 +349,11 @@ export async function claudeSdkOptions({ env, options, request, resumeSessionId,
   }
   const model = normalizeModel(request.model)
   const effort = normalizeEffort(request.reasoningEffort)
+  const policy = executionPolicyFor(request, env, cwd)
+  if (policy.permission === 'workspace-write' && typeof policy.approvalHandler !== 'function') throw new Error(`${PREFIX}: Workspace Write requires the target-session approval handler`)
   const entry = await resolveClaudeEntry(env, {
     ...(options.claudeExecutable ? { claudeExecutable: options.claudeExecutable } : {}),
+    ...(options.runtimeRequirement ? { runtimeRequirement: options.runtimeRequirement } : {}),
   })
   return {
     cwd,
@@ -369,9 +363,9 @@ export async function claudeSdkOptions({ env, options, request, resumeSessionId,
     ...(abortController === undefined ? {} : { abortController }),
     pathToClaudeCodeExecutable: entry.entry,
     ...(/\.(?:m?js|cjs)$/iu.test(entry.entry) ? { executable: 'node' } : {}),
-    permissionMode: 'bypassPermissions',
-    allowDangerouslySkipPermissions: true,
-    sandbox: { enabled: false },
+    permissionMode: policy.permission === 'danger-full-access' ? 'bypassPermissions' : policy.permission === 'read-only' ? 'plan' : 'default',
+    ...(policy.permission === 'danger-full-access' ? { allowDangerouslySkipPermissions: true, sandbox: { enabled: false } } : { sandbox: { enabled: true } }),
+    ...(typeof policy.approvalHandler === 'function' ? { canUseTool: policy.approvalHandler } : {}),
     persistSession: true,
     includePartialMessages: true,
     systemPrompt: { type: 'preset', preset: 'claude_code' },
@@ -381,6 +375,11 @@ export async function claudeSdkOptions({ env, options, request, resumeSessionId,
 export async function runClaudeSdk({ env, options, request, resumeSessionId }) {
   const prompt = typeof request.prompt === 'string' ? request.prompt : ''
   if (!prompt.trim()) throw new Error(`${PREFIX}: prompt is required`)
+  const cwd = request.cwd ?? request.parentCwd ?? env.cwd
+  const policy = executionPolicyFor(request, env, cwd)
+  const capabilities = claudeChannelCapabilities()
+  if (!supportsExecutionPolicy({ capabilities }, policy)) return unsupportedPermissionPolicy(CHANNEL_ID, policy, capabilities)
+  if (policy.permission === 'workspace-write' && typeof policy.approvalHandler !== 'function') return unsupportedPermissionPolicy(CHANNEL_ID, policy, capabilities, 'Claude Code requires the target-session approval callback for Workspace Write')
   const sdk = await loadClaudeSdk(options)
   const abortController = new AbortController()
   const onAbort = () => abortController.abort(env.signal?.reason)
@@ -404,7 +403,7 @@ export async function runClaudeSdk({ env, options, request, resumeSessionId }) {
     const sdkOptions = await claudeSdkOptions({ env, options, request, resumeSessionId, abortController })
     query = sdk.query({ prompt, options: sdkOptions })
     for await (const message of query) {
-      assertSdkInitPolicy(message)
+      assertSdkInitPolicy(message, policy)
       if (typeof message?.session_id === 'string') sessionId = message.session_id
       const partial = partialTextFromSdkMessage(message)
       if (partial !== undefined && partial.length > 0) {
@@ -540,6 +539,9 @@ async function startManagedClaude({ env, options, managed, request }) {
     const prompt = typeof request.prompt === 'string' ? request.prompt : ''
     if (!prompt.trim()) throw new Error('startManagedSession requires a prompt')
     if (env.signal?.aborted) throw new Error('startManagedSession was aborted before launch')
+    const policy = executionPolicyFor(request, env, request.cwd ?? env.cwd)
+    if (!supportsExecutionPolicy({ capabilities: caps }, policy)) return unsupportedPermissionPolicy(CHANNEL_ID, policy, caps)
+    if (policy.permission === 'workspace-write' && typeof policy.approvalHandler !== 'function') return unsupportedPermissionPolicy(CHANNEL_ID, policy, caps, 'Claude Code requires the target-session approval callback for Workspace Write')
     const sdk = await loadClaudeSdk(options)
     const abortController = new AbortController()
     const sdkOptions = await claudeSdkOptions({ env, options, request, abortController })
@@ -565,7 +567,7 @@ async function startManagedClaude({ env, options, managed, request }) {
     state.settlement = (async () => {
       try {
         for await (const message of query) {
-          assertSdkInitPolicy(message)
+          assertSdkInitPolicy(message, policy)
           if (typeof message?.session_id === 'string' && state.sessionId === undefined) {
             state.sessionId = message.session_id
             state.status = 'active'
@@ -710,7 +712,8 @@ export function claudeChannelCapabilities() {
     streaming: false,
     modelOverride: true,
     effortOverride: true,
-    // Every SDK query fixes bypassPermissions + explicit sandbox.enabled=false.
+    executionPolicies: { 'read-only': true, 'workspace-write': true, 'danger-full-access': true },
+    // Full Access uses bypassPermissions; restricted modes use official permission modes and SDK approval callbacks.
     sandboxBypassGuaranteed: true,
   }
 }
@@ -729,7 +732,7 @@ export function createClaudeCodeChannel(options = {}) {
       return runClaudeSdk({
         env,
         options: normalizedOptions,
-        request,
+        request: { ...request, ...(normalizedOptions.runtimeRequirement ? { runtimeRequirement: normalizedOptions.runtimeRequirement } : {}) },
         resumeSessionId: request.resumeSessionId,
       })
     },
@@ -737,7 +740,7 @@ export function createClaudeCodeChannel(options = {}) {
       return runClaudeSdk({
         env,
         options: normalizedOptions,
-        request,
+        request: { ...request, ...(normalizedOptions.runtimeRequirement ? { runtimeRequirement: normalizedOptions.runtimeRequirement } : {}) },
         resumeSessionId: request.resumeSessionId ?? request.sessionId,
       })
     },
