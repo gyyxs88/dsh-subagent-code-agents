@@ -20,8 +20,10 @@
 
 import { StringDecoder } from 'node:string_decoder'
 import { executionPolicyFor, supportsExecutionPolicy, unsupportedPermissionPolicy } from '@dsh-subagent-code-agents/core'
+import { approvalResponse, assertThreadStartResponse, assertTurnStartResponse, parseApprovalRequest } from './app-server-protocol.js'
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000
+const DEFAULT_APP_SERVER_TURN_TIMEOUT_MS = 10 * 60_000
 const MAX_LINE_BUFFER_BYTES = 4 * 1024 * 1024
 const MAX_PENDING_REQUESTS = 128
 
@@ -55,9 +57,10 @@ export class AppServerError extends Error {
 }
 
 class PendingRequest {
-  constructor(id, method, resolve, reject, timer) {
+  constructor(id, method, params, resolve, reject, timer) {
     this.id = id
     this.method = method
+    this.params = params
     this.resolve = resolve
     this.reject = reject
     this.timer = timer
@@ -65,7 +68,7 @@ class PendingRequest {
 }
 
 export class AppServerClient {
-  constructor({ spawn, argvPrefix, node, js, cwd, requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS, logger }) {
+  constructor({ spawn, argvPrefix, node, js, cwd, requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS, logger, approvalHandler, targetSessionId }) {
     if (typeof spawn !== 'function') throw new Error('AppServerClient: spawn is required')
     const prefix = Array.isArray(argvPrefix) ? argvPrefix : [node, js]
     if (prefix.length === 0 || prefix.some((part) => typeof part !== 'string' || part.length === 0)) {
@@ -76,7 +79,8 @@ export class AppServerClient {
     this._cwd = cwd
     this._requestTimeoutMs = requestTimeoutMs
     this._logger = logger ?? { info() {}, warn() {}, error() {} }
-    this._approvalHandler = undefined
+    this._approvalHandler = typeof approvalHandler === 'function' ? approvalHandler : undefined
+    this._targetSessionId = typeof targetSessionId === 'string' && targetSessionId.length > 0 ? targetSessionId : undefined
 
     this._handle = undefined
     this._nextId = 1
@@ -88,7 +92,12 @@ export class AppServerClient {
     this._disposePromise = undefined
 
     this._threads = new Map()
+    this._ownedThreads = new Set()
     this._ownedTurns = new Set()
+    this._turnThreads = new Map()
+    this._turnWaiters = new Map()
+    this._turnCompletions = new Map()
+    this._turnOutputs = new Map()
     this._listeners = new Set()
   }
 
@@ -214,10 +223,24 @@ export class AppServerClient {
   }
 
   _answerServerRequest(id, method, params) {
-    if (method.toLowerCase().includes('approval') && typeof this._approvalHandler === 'function') {
-      Promise.resolve(this._approvalHandler({ channel: 'codex', method, params }))
+    let approval
+    try {
+      approval = parseApprovalRequest(method, params)
+    } catch (error) {
+      try { this._handle.stdin.write(`${JSON.stringify({ id, error: { code: -32602, message: error.message } })}\n`) } catch {}
+      return
+    }
+    if (approval !== undefined && (!this._ownedThreads.has(approval.params.threadId)
+      || !this._ownedTurns.has(approval.params.turnId)
+      || this._turnThreads.get(approval.params.turnId) !== approval.params.threadId)) {
+      try { this._handle.stdin.write(`${JSON.stringify({ id, error: { code: -32000, message: 'approval request is not owned by this target Session' } })}\n`) } catch {}
+      return
+    }
+    if (approval !== undefined && typeof this._approvalHandler === 'function') {
+      Promise.resolve(this._approvalHandler({ channel: 'codex', method, kind: approval.kind, params: approval.params, requestId: id }))
         .then((decision) => {
-          const line = JSON.stringify({ id, result: decision })
+          const result = approvalResponse(method, params, decision)
+          const line = JSON.stringify({ id, result })
           try { this._handle.stdin.write(line + '\n') } catch {}
         })
         .catch(() => {
@@ -235,6 +258,7 @@ export class AppServerClient {
   }
 
   setApprovalHandler(handler) {
+    if (this._initialized) throw new Error('AppServerClient: approval handler is immutable after startup')
     this._approvalHandler = typeof handler === 'function' ? handler : undefined
   }
 
@@ -243,6 +267,14 @@ export class AppServerClient {
     if (!pending) return
     this._pending.delete(id)
     clearTimeout(pending.timer)
+    if (pending.method === 'thread/start' && typeof result?.thread?.id === 'string') {
+      this._markManaged(result.thread.id)
+      this._updateThreadStatus(result.thread.id, result.thread.status)
+    } else if (pending.method === 'turn/start' && typeof result?.turn?.id === 'string' && typeof pending.params?.threadId === 'string') {
+      this._ownedTurns.add(result.turn.id)
+      this._markManaged(pending.params.threadId)
+      this._markTurnStarted(pending.params.threadId, result.turn.id)
+    }
     pending.resolve(result)
   }
 
@@ -265,8 +297,20 @@ export class AppServerClient {
       if (this._ownedTurns.has(params.turn.id)) {
         this._markTurnStarted(params.turn.threadId ?? params.threadId, params.turn.id)
       }
+    } else if (method === 'item/agentMessage/delta' && params && typeof params.turnId === 'string' && typeof params.delta === 'string') {
+      this._appendTurnOutput(params.turnId, params.delta)
+    } else if (method === 'item/completed' && params && typeof params.turnId === 'string' && params.item?.type === 'agentMessage' && typeof params.item.text === 'string') {
+      this._appendTurnOutput(params.turnId, params.item.text)
     } else if (method === 'turn/completed' && params && params.turn && typeof params.turn.id === 'string') {
-      this._markTurnEnded(params.turn.threadId ?? params.threadId, params.turn.id)
+      const turnId = params.turn.id
+      const threadId = params.turn.threadId ?? params.threadId ?? this._turnThreads.get(turnId)
+      const status = typeof params.turn.status === 'string' ? params.turn.status : params.turn.status?.type
+      const inlineText = Array.isArray(params.turn.items)
+        ? params.turn.items.filter((item) => item?.type === 'agentMessage' && typeof item.text === 'string').map((item) => item.text).join('')
+        : ''
+      if (inlineText && !(this._turnOutputs.get(turnId) ?? '')) this._appendTurnOutput(turnId, inlineText)
+      this._markTurnEnded(threadId, turnId)
+      this._settleTurnCompletion(turnId, { threadId, turnId, status: status ?? 'completed', output: this._turnOutputs.get(turnId) ?? '' })
     }
     for (const handler of this._listeners) {
       try {
@@ -291,11 +335,13 @@ export class AppServerClient {
     existing.status = THREAD_STATUS.ACTIVE
     existing.activeTurnId = turnId
     this._threads.set(threadId, existing)
+    if (typeof threadId === 'string') this._turnThreads.set(turnId, threadId)
   }
 
   _markTurnEnded(threadId, turnId) {
     if (!threadId) return
     this._ownedTurns.delete(turnId)
+    this._turnThreads.delete(turnId)
     const existing = this._threads.get(threadId) ?? { managed: false }
     if (existing.activeTurnId === turnId) {
       existing.activeTurnId = undefined
@@ -308,6 +354,45 @@ export class AppServerClient {
     const existing = this._threads.get(threadId) ?? {}
     existing.managed = true
     this._threads.set(threadId, existing)
+    this._ownedThreads.add(threadId)
+  }
+
+  _appendTurnOutput(turnId, text) {
+    if ((typeof this._turnThreads.get(turnId) !== 'string' && !this._ownedTurns.has(turnId)) || typeof text !== 'string' || text.length === 0) return
+    const current = this._turnOutputs.get(turnId) ?? ''
+    this._turnOutputs.set(turnId, `${current}${text}`.slice(-65_536))
+  }
+
+  _settleTurnCompletion(turnId, completion) {
+    const waiter = this._turnWaiters.get(turnId)
+    if (waiter !== undefined) {
+      this._turnWaiters.delete(turnId)
+      clearTimeout(waiter.timer)
+      waiter.resolve(completion)
+    } else {
+      this._turnCompletions.set(turnId, completion)
+      if (this._turnCompletions.size > 64) this._turnCompletions.delete(this._turnCompletions.keys().next().value)
+    }
+  }
+
+  waitForTurn(turnId, { timeoutMs = this._requestTimeoutMs } = {}) {
+    if (typeof turnId !== 'string' || !this._ownedTurns.has(turnId) && !this._turnCompletions.has(turnId)) {
+      return Promise.reject(new AppServerError(-32602, 'waitForTurn: unknown or unowned turn'))
+    }
+    const completed = this._turnCompletions.get(turnId)
+    if (completed !== undefined) {
+      this._turnCompletions.delete(turnId)
+      return Promise.resolve(completed)
+    }
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        if (!this._turnWaiters.delete(turnId)) return
+        const error = new AppServerError(-32001, `app-server turn timed out: ${turnId}`)
+        error.outcomeUnknown = true
+        reject(error)
+      }, timeoutMs)
+      this._turnWaiters.set(turnId, { resolve, reject, timer })
+    })
   }
 
   _onExit(code) {
@@ -318,6 +403,13 @@ export class AppServerClient {
       pending.reject(error)
     }
     this._pending.clear()
+    const turnError = new AppServerError(-32000, `app-server process exited (code ${code})`)
+    for (const [turnId, waiter] of this._turnWaiters) {
+      clearTimeout(waiter.timer)
+      turnError.outcomeUnknown = true
+      waiter.reject(turnError)
+      this._turnWaiters.delete(turnId)
+    }
   }
 
   request(method, params, { timeoutMs } = {}) {
@@ -338,7 +430,7 @@ export class AppServerClient {
         err.outcomeUnknown = true
         reject(err)
       }, timeout)
-      this._pending.set(id, new PendingRequest(id, method, resolve, reject, timer))
+      this._pending.set(id, new PendingRequest(id, method, params, resolve, reject, timer))
       const line = JSON.stringify({ id, method, ...(params === undefined ? {} : { params }) })
       try {
         this._handle.stdin.write(line + '\n')
@@ -383,11 +475,9 @@ export class AppServerClient {
     })
     if (cwd !== undefined) params.cwd = cwd
     if (model !== undefined) params.model = model
-    const result = await this.request('thread/start', params)
-    const thread = result?.thread
-    if (!thread || typeof thread.id !== 'string') {
-      throw new AppServerError(-32602, 'app-server thread/start returned no thread')
-    }
+    let result
+    try { result = assertThreadStartResponse(await this.request('thread/start', params)) } catch (error) { throw new AppServerError(-32602, error.message) }
+    const thread = result.thread
     this._markManaged(thread.id)
     this._updateThreadStatus(thread.id, thread.status)
     return result
@@ -414,9 +504,10 @@ export class AppServerClient {
     if (model !== undefined) params.model = model
     if (effort !== undefined) params.effort = effort
     if (cwd !== undefined) params.cwd = cwd
-    const result = await this.request('turn/start', params)
-    const turn = result?.turn
-    if (turn && typeof turn.id === 'string') {
+    let result
+    try { result = assertTurnStartResponse(await this.request('turn/start', params)) } catch (error) { throw new AppServerError(-32602, error.message) }
+    const turn = result.turn
+    if (typeof turn.id === 'string') {
       this._ownedTurns.add(turn.id)
       this._markManaged(threadId)
       this._markTurnStarted(threadId, turn.id)
@@ -451,6 +542,13 @@ export class AppServerClient {
       pending.reject(error)
     }
     this._pending.clear()
+    const errorForTurns = new AppServerError(-32000, 'app-server client disposed')
+    errorForTurns.outcomeUnknown = true
+    for (const [turnId, waiter] of this._turnWaiters) {
+      clearTimeout(waiter.timer)
+      waiter.reject(errorForTurns)
+      this._turnWaiters.delete(turnId)
+    }
     const handle = this._handle
     this._handle = undefined
     if (handle) {
@@ -525,12 +623,10 @@ function summarizeThread(thread) {
  */
 export function createCodexAppServerChannel(options = {}) {
   const clientOptions = {
-    spawn: undefined, // filled lazily from env
-    argvPrefix: undefined,
     requestTimeoutMs: options.appServerRequestTimeoutMs,
     logger: options.logger,
   }
-  let clientSingleton
+  const clients = new Map()
 
   const base = {
     id: 'codex',
@@ -540,49 +636,118 @@ export function createCodexAppServerChannel(options = {}) {
     },
   }
 
+  function clientKey(policy) {
+    if (!policy) return 'unscoped'
+    return [policy.sourceSessionId ?? '', policy.targetSessionId ?? '', policy.permission ?? '', policy.workspaceRoot ?? ''].join('\u0000')
+  }
+
   async function getClient(env, policy = null) {
-    if (clientSingleton !== undefined && clientSingleton.initialized) {
-      if (policy) clientSingleton.setApprovalHandler(policy.approvalHandler)
-      return clientSingleton
-    }
-    if (clientSingleton !== undefined && !clientSingleton.closed) {
-      // In-flight initialization: wait for it (single-flight), don't start a
-      // second child.
-      await clientSingleton.ensureStarted()
-      if (!clientSingleton.initialized) {
+    const key = clientKey(policy)
+    let client = clients.get(key)
+    if (client !== undefined && client.initialized) return client
+    if (client !== undefined && !client.closed) {
+      await client.ensureStarted()
+      if (!client.initialized) {
         throw new Error('app-server client failed to initialize')
       }
-      return clientSingleton
+      return client
     }
-    if (clientOptions.spawn === undefined) {
-      const { resolveCodexEntry } = await import('./index.js')
-      const { argvPrefix } = await resolveCodexEntry(env, options)
-      clientOptions.argvPrefix = argvPrefix
-      clientOptions.spawn = (argv, opts) =>
-        env.subprocess.spawn({
-          argv,
-          cwd: opts?.cwd,
-          stdio: { stdin: 'pipe', stdout: 'pipe', stderr: 'pipe' },
-          graceMs: 2000,
-        })
-      clientOptions.logger = clientOptions.logger ?? env.logger
-      clientOptions.cwd = options.cwd ?? env.cwd
-    }
-    const client = new AppServerClient({ ...clientOptions, approvalHandler: policy?.approvalHandler })
-    clientSingleton = client
+    const { resolveCodexEntry } = await import('./index.js')
+    const { argvPrefix } = await resolveCodexEntry(env, options)
+    const spawn = (argv, opts) => env.subprocess.spawn({
+      argv,
+      cwd: opts?.cwd,
+      stdio: { stdin: 'pipe', stdout: 'pipe', stderr: 'pipe' },
+      graceMs: 2000,
+    })
+    client = new AppServerClient({
+      ...clientOptions,
+      argvPrefix,
+      spawn,
+      logger: clientOptions.logger ?? env.logger,
+      cwd: options.cwd ?? env.cwd,
+      approvalHandler: policy?.approvalHandler,
+      targetSessionId: policy?.targetSessionId,
+    })
+    clients.set(key, client)
     try {
       await client.ensureStarted()
     } catch (error) {
       await client.dispose().catch(() => {})
-      clientSingleton = undefined
+      if (clients.get(key) === client) clients.delete(key)
       throw error
     }
     return client
   }
 
+  function findClientForThread(threadId) {
+    for (const client of clients.values()) {
+      if (client.isManaged(threadId)) return client
+    }
+    return undefined
+  }
+
+  async function runAppServerTurn(request, env, resumeSessionId) {
+    const cwd = request.cwd ?? request.parentCwd ?? env.cwd
+    let policy
+    try {
+      policy = executionPolicyFor(request, env, cwd)
+    } catch (error) {
+      return unsupportedPermissionPolicy('codex', request?.executionPolicy, base.capabilities, String(error?.message ?? error))
+    }
+    if (!supportsExecutionPolicy(base, policy)) return unsupportedPermissionPolicy('codex', policy, base.capabilities)
+    if (policy.permission !== 'workspace-write' || typeof policy.approvalHandler !== 'function') {
+      return unsupportedPermissionPolicy('codex', policy, base.capabilities, 'Codex app-server bridge requires Workspace Write target-session approval')
+    }
+    if (typeof request.prompt !== 'string' || request.prompt.trim() === '') throw new Error('channel-codex: prompt is required')
+    const client = await getClient(env, policy)
+    const model = request.model ?? request.codexOptions?.model ?? request.agentOptions?.model
+    const effort = request.reasoningEffort ?? request.codexOptions?.reasoningEffort
+    const started = resumeSessionId === undefined
+      ? await client.threadStart({ cwd, model, executionPolicy: policy })
+      : await client.threadResume(resumeSessionId, { model, executionPolicy: policy })
+    const threadId = resumeSessionId ?? started?.thread?.id
+    if (typeof threadId !== 'string' || threadId.length === 0) throw new Error('Codex app-server returned no thread id')
+    const turn = await client.turnStart({
+      threadId,
+      input: [{ type: 'text', text: request.prompt }],
+      ...(model === undefined ? {} : { model }),
+      ...(effort === undefined ? {} : { effort }),
+      ...(cwd === undefined ? {} : { cwd }),
+      executionPolicy: policy,
+    })
+    const turnId = turn?.turn?.id
+    if (typeof turnId !== 'string') throw new Error('Codex app-server returned no turn id')
+    const completion = await client.waitForTurn(turnId, { timeoutMs: options.appServerTurnTimeoutMs ?? DEFAULT_APP_SERVER_TURN_TIMEOUT_MS })
+    const output = typeof completion.output === 'string' ? completion.output : ''
+    if (completion.status !== 'completed') {
+      return {
+        channel: 'codex',
+        runId: `codex-${Date.now().toString(36)}`,
+        sessionId: threadId,
+        turnId,
+        stopReason: completion.status === 'interrupted' ? 'aborted' : 'error',
+        output,
+        capabilities: base.capabilities,
+      }
+    }
+    return {
+      channel: 'codex',
+      runId: `codex-${Date.now().toString(36)}`,
+      sessionId: threadId,
+      turnId,
+      stopReason: 'completed',
+      output,
+      capabilities: base.capabilities,
+    }
+  }
+
   return {
     ...base,
     async run(request, env) {
+      const cwd = request.cwd ?? request.parentCwd ?? env.cwd
+      const policy = executionPolicyFor(request, env, cwd)
+      if (policy.permission === 'workspace-write') return runAppServerTurn(request, env, request.resumeSessionId)
       const { runCodexExec } = await import('./index.js')
       return runCodexExec({
         env,
@@ -592,6 +757,9 @@ export function createCodexAppServerChannel(options = {}) {
       })
     },
     async resume(request, env) {
+      const cwd = request.cwd ?? request.parentCwd ?? env.cwd
+      const policy = executionPolicyFor(request, env, cwd)
+      if (policy.permission === 'workspace-write') return runAppServerTurn(request, env, request.resumeSessionId ?? request.sessionId)
       const { runCodexExec } = await import('./index.js')
       return runCodexExec({
         env,
@@ -751,7 +919,7 @@ export function createCodexAppServerChannel(options = {}) {
       }
     },
     async steerActive(opts, env) {
-      const client = await getClient(env)
+      const client = findClientForThread(opts.sessionId) ?? await getClient(env)
       const thread = await client.threadRead(opts.sessionId, { includeTurns: false })
       const statusType = thread.status?.type ?? 'notLoaded'
       // systemError is a HARD failure (mirrors the legacy plugin semantics) —
@@ -819,7 +987,7 @@ export function createCodexAppServerChannel(options = {}) {
       }
     },
     async cancel(opts, env) {
-      const client = await getClient(env)
+      const client = findClientForThread(opts.sessionId) ?? await getClient(env)
       const state = client.threadState(opts.sessionId)
       const turnId = opts.runId ?? state?.activeTurnId
       if (typeof turnId !== 'string') {
@@ -843,10 +1011,8 @@ export function createCodexAppServerChannel(options = {}) {
       }
     },
     async dispose() {
-      if (clientSingleton !== undefined) {
-        await clientSingleton.dispose().catch(() => {})
-        clientSingleton = undefined
-      }
+      await Promise.allSettled([...clients.values()].map((client) => client.dispose()))
+      clients.clear()
     },
   }
 }

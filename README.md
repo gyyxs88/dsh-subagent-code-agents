@@ -4,7 +4,9 @@ DeepSeek Harness（DSH）的多渠道编码代理子代理插件：内置 OpenAI
 
 ## 远程项目与运行时部署
 
-本插件是渠道适配器，不负责把 Codex、Claude Code、Grok Build 安装或认证到远端主机；远程安装由 `dsh-remote-control` 的受信 Runtime Manager 按项目 Desired State 完成。每个 channel package 的 `package.json` 暴露 machine-readable `dsh.remote.runtime` requirement，启动时从注入的 Runtime Manager 获取已校验的绝对 executable，缺失、未认证、漂移或不兼容均结构化拒绝，不回退到 PATH。第三方登录态只留远端，不读取或复制 `~/.codex`、`~/.claude`、`~/.grok`、Cookie、OAuth token 或 API key。完整组件边界、权限继承、安装流程和验收标准见 [`dsh-session-control` 的远程项目架构文档](https://github.com/gyyxs88/dsh-session-control/blob/main/docs/remote-project-architecture.md)。
+本插件是渠道适配器，不负责把 Codex、Claude Code、Grok Build 安装或认证到远端主机；远程安装由 `dsh-remote-control` 的受信 Runtime Manager 按项目 Desired State 完成。每个 channel package 的 `package.json` 暴露稳定的 `dsh.remote.channelRuntime` 渠道需求声明；管理员受信 catalog 再解析为固定供应商版本、来源、大小、SHA-256、packageName 和 executablePath，形成独立的 RuntimeRequirement。启动时从正式注入的 Runtime Manager（生产使用 `runtimeManagerSocket` + 0600 Host capability token 文件）获取已校验的绝对 executable，缺失、未认证、漂移、receipt 未绑定或不兼容均结构化拒绝，不回退到 PATH。第三方登录态只留远端，不读取或复制 `~/.codex`、`~/.claude`、`~/.grok`、Cookie、OAuth token 或 API key。完整组件边界、权限继承、安装流程和验收标准见 [`dsh-session-control` 的远程项目架构文档](https://github.com/gyyxs88/dsh-session-control/blob/main/docs/remote-project-architecture.md)。
+
+`dsh.remote.channelRuntime` 只声明稳定 runtime id、driver、placement、协议、能力和 DSH/API 兼容范围，不冒充供应商版本。管理员 catalog 的 `dsh.runtime` 才是可安装包身份；Desired State builder 从已选 channelRuntime 自动推导 exact RuntimeRequirement，不要求调用方重复拼写。Remote Host 的 runtime socket 通过 Host-scoped capability token 文件认证，token 文件必须是 owner-only 的普通文件；channel 请求另带真实 target Session，daemon 用已完成安装 receipt 和项目归属核验后返回同一个绝对 executable。socket 断开、daemon 重启、receipt 漂移或认证 lease 过期均 fail closed。
 
 ```
 packages/
@@ -46,7 +48,7 @@ packages/
 > `sandboxBypassGuaranteed` 只描述 Full Access 路径的真实保证，不是默认策略或安全边界：
 > - **codex**：Full Access 才使用 CLI bypass 或 app-server `never`/`dangerFullAccess`；Read Only/Workspace Write 映射到官方审批与 sandbox profile。
 > - **claude-code**：Full Access 才使用 `bypassPermissions`、`allowDangerouslySkipPermissions` 和 sandbox off；受限模式使用 SDK 正式权限与审批回调，模式漂移 fail closed。
-> - **grok-build**：Full Access 才使用 `--permission-mode bypassPermissions`、`--sandbox off` 和 managed `--always-approve`；Read Only 使用官方只读/严格 sandbox，Workspace Write 当前显式 unsupported。
+> - **grok-build**：Full Access 才使用 `--permission-mode bypassPermissions`、`--sandbox off` 和 managed `--always-approve`；Read Only 使用官方 `read-only` profile、只读工具 allowlist 并显式移除写入/网络/越界能力，Workspace Write 当前显式 unsupported。
 > - **ACP**：权限与沙箱由 ACP agent 在初始化中声明并由 channel config 允许；未声明的组合返回 `unsupported-permission-policy`，不伪造统一能力。
 
 `ChannelExecutionPolicy` 必须由目标 Session 继承，至少包含 permission、匹配的 approval owner/mode、workspaceRoot 和可选 target/source session identity。只有 Full Access 的 `full-access-controller` 可使用 bypass/always-approve/sandbox-off；Workspace Write 的人工审批保留在 `target-session`。能力提示不是安全边界，受限模式仍由 DSH 外层 sandbox 兜底。
@@ -169,7 +171,7 @@ npm pack
   config: { channel: grok-build, providerName: coding-agent/grok-build }
 ```
 
-每行可配置 `runtimeRequirement`、`runtimeManager` 和 `executionPolicy`；正式远程部署优先只传 Runtime Manager 返回的绝对 executable。`codexExecutable`、`claudeExecutable`、`grokExecutable` 仅作为受控的绝对路径注入/测试边界，不触发 PATH 搜索，不能是 `.cmd/.ps1/.bat` shim；`codexExecutable` 与 `codexJs` 不可同时设置。Claude Agent SDK 继续使用远端用户已经完成的官方认证；Grok 的 `grokHome` 只用于远端 session metadata 读取，不得用来把登录目录复制到本机。
+每行可配置 `runtimeRequirement`、`runtimeManagerSocket`、`runtimeManagerHostId`、`runtimeManagerSourceHostId`、`runtimeManagerSourceSessionId`、`runtimeManagerCapabilityTokenFile`、`runtimeManagerTimeoutMs` 和 `appServerTurnTimeoutMs`，以及受信的 Session Control policy service；这些是公开配置字段，不传函数或任意 manager 对象。Runtime Manager 的 socket、Host/source 身份和 0600 capability token 必须成组配置；channel 另从目标 Session policy 获取真实 `targetSessionId`，不能把来源身份冒充 target。正式远程部署优先只传 Runtime Manager 返回的绝对 executable。`codexExecutable`、`claudeExecutable`、`grokExecutable` 仅作为受控的绝对路径注入/测试边界，不触发 PATH 搜索，不能是 `.cmd/.ps1/.bat` shim；`codexExecutable` 与 `codexJs` 不可同时设置。Claude Agent SDK 继续使用远端用户已经完成的官方认证；Grok 的 `grokHome` 只用于远端 session metadata 读取，不得用来把登录目录复制到本机。
 
 macOS 上若 DSH 的 PATH 没有包含渠道 CLI，可显式填写绝对路径，例如：
 
@@ -219,7 +221,7 @@ ACP 实例按需追加；`id`/`name` 只写实例名，注册后是 `acp/<name>`
 | `codex_sessions_list` / `read` / `start` / `send` / `cancel` | `coding_sessions_list` / `coding_session_read` / `coding_session_start` / `coding_session_send` / `coding_session_cancel`（需显式 `channel: "codex"`） |
 | `tool-subagent-codex` 工具行 | bundle 自动策略（除 `minimal`）；有专属配置时仍可手工使用 `tool-subagent-code-agents` |
 
-权限策略不再固定 bypass：只有目标 Session 为 Full Access 时 Codex 才使用 `--dangerously-bypass-approvals-and-sandbox` 或 app-server `dangerFullAccess`；Read Only/Workspace Write 按目标 policy 映射官方审批与 sandbox，无法兑现时显式拒绝。
+权限策略不再固定 bypass：只有目标 Session 为 Full Access 时 Codex 才使用 `--dangerously-bypass-approvals-and-sandbox` 或 app-server `dangerFullAccess`；Read Only 使用官方受限 CLI，Workspace Write 必须走按 target Session 隔离的 Codex app-server approval bridge，不能用没有 server-request bridge 的 `codex exec` 冒充支持；无法兑现时显式拒绝。`appServerTurnTimeoutMs` 是独立于短 RPC timeout 的 turn 等待上限。
 
 ## 扩展渠道
 
@@ -264,6 +266,16 @@ npm run pack:check          # 打包验证：6 个 workspace tgz 清单 + 根 tg
 ```
 
 测试使用 fake subprocess/fs/ACP，**不调用真实模型、不启动真实 provider、不读写密钥/登录态**。`pack:check` 会把根包真实 `npm pack` 到系统临时目录、在一次性 consumer 中 `npm install` 根 tgz（`--ignore-scripts --legacy-peer-deps`，peer 从 workspace 的 node_modules 显式提供以模拟真实 DSH 宿主），验证 `dsh-subagent-code-agents` 与 `/tool` 可 import、6 个 bundled 内部依赖真实存在，随后清理所有临时文件/tgz。
+
+默认 clone 不依赖 sibling 仓库：Runtime Manager 与 Session Control 的跨仓消费测试会 skip，单仓 fake/fixture 测试仍完整运行。需要做 opt-in 契约验收时，显式传入绝对路径：
+
+```powershell
+$env:DSH_SESSION_CONTROL_ROOT = 'D:\Project\deepseek-harness-lab\dsh-session-control'
+$env:DSH_REMOTE_CONTROL_ROOT = 'D:\Project\deepseek-harness-lab\dsh-remote-control'
+npm test
+```
+
+remote-control 的 channel manifest 消费测试也可使用 `DSH_SUBAGENT_CODE_AGENTS_ROOT` 指向已 checkout 的本仓库；未设置时使用仓库内 machine-readable fixture。环境变量只用于测试，不是生产运行时配置。
 
 ## License
 

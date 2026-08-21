@@ -1,5 +1,7 @@
 const PERMISSIONS = Object.freeze(['read-only', 'workspace-write', 'danger-full-access'])
 const APPROVAL_OWNERS = Object.freeze(['target-session', 'full-access-controller'])
+const PROVENANCE_AUTHORITIES = Object.freeze(['dsh-session-control', 'unverified-local'])
+export const TRUSTED_EXECUTION_POLICY = Symbol.for('dsh.trusted-execution-policy')
 
 function invalid(message, code = 'UNSUPPORTED_PERMISSION_POLICY') {
   const error = new Error(message)
@@ -25,14 +27,22 @@ export function normalizeExecutionPolicy(value, { cwd } = {}) {
   const approvalOwner = value.approvalOwner ?? expectedOwner
   if (!APPROVAL_OWNERS.includes(approvalOwner) || approvalOwner !== expectedOwner) invalid('channel execution policy approval owner does not match permission')
   const workspaceRoot = absoluteWorkspaceRoot(value.workspaceRoot, cwd)
-  const approvalMode = value.approvalMode ?? (permission === 'danger-full-access' ? 'controller-fingerprint' : 'target-session')
-  if (permission === 'danger-full-access' && approvalMode !== 'controller-fingerprint') invalid('Full Access requires controller-fingerprint approval mode')
+  const approvalMode = value.approvalMode ?? (permission === 'danger-full-access' ? 'controller-verified' : 'target-session')
+  if (permission === 'danger-full-access' && approvalMode !== 'controller-verified') invalid('Full Access requires controller-verified approval mode')
   if (permission !== 'danger-full-access' && approvalMode !== 'target-session') invalid('restricted modes require target-session approval mode')
+  const provenanceValue = value.provenance && typeof value.provenance === 'object' ? value.provenance : {}
+  const provenance = {
+    authority: provenanceValue.authority ?? 'unverified-local',
+    verified: provenanceValue.verified === true,
+  }
+  if (!PROVENANCE_AUTHORITIES.includes(provenance.authority)) invalid('execution policy provenance authority is invalid')
+  if (provenance.verified && provenance.authority !== 'dsh-session-control') invalid('verified execution policy provenance must come from DSH Session Control')
   return {
     permission,
     approvalOwner,
     approvalMode,
     workspaceRoot,
+    provenance,
     ...(typeof value.sourceSessionId === 'string' ? { sourceSessionId: value.sourceSessionId } : {}),
     ...(typeof value.targetSessionId === 'string' ? { targetSessionId: value.targetSessionId } : {}),
     ...(typeof value.operationId === 'string' ? { operationId: value.operationId } : {}),
@@ -42,7 +52,56 @@ export function normalizeExecutionPolicy(value, { cwd } = {}) {
 }
 
 export function executionPolicyFor(request, env, cwd) {
-  return normalizeExecutionPolicy(request?.executionPolicy ?? env?.executionPolicy, { cwd })
+  const source = env?.executionPolicy ?? request?.[TRUSTED_EXECUTION_POLICY]
+  if (source === undefined) invalid('channel launch requires an execution policy from the target DSH Session', 'EXECUTION_POLICY_SOURCE_REQUIRED')
+  const authoritative = normalizeExecutionPolicy(source, { cwd })
+  if (request?.executionPolicy !== undefined) {
+    const requested = normalizeExecutionPolicy(request.executionPolicy, { cwd })
+    const keys = ['permission', 'approvalOwner', 'approvalMode', 'workspaceRoot', 'sourceSessionId', 'targetSessionId', 'operationId']
+    if (keys.some((key) => authoritative[key] !== requested[key])) invalid('request executionPolicy cannot override the target Session policy', 'EXECUTION_POLICY_OVERRIDE')
+  }
+  return assertTrustedExecutionPolicy(authoritative)
+}
+
+export function assertTrustedExecutionPolicy(policy, { permission } = {}) {
+  const normalized = normalizeExecutionPolicy(policy, { cwd: policy?.workspaceRoot })
+  if (permission !== undefined && normalized.permission !== permission) invalid('execution policy permission changed at launch', 'EXECUTION_POLICY_OVERRIDE')
+  if (!normalized.provenance.verified || normalized.provenance.authority !== 'dsh-session-control') {
+    invalid('channel launch requires a policy resolved by the target DSH Session', 'EXECUTION_POLICY_UNTRUSTED')
+  }
+  return normalized
+}
+
+/**
+ * Adapt the formal DSH Session Control verifier port to the plugin's async
+ * policy hook. The port is injected by the Host; the plugin never constructs
+ * a verified policy from request data.
+ */
+export function createSessionControlExecutionPolicyVerifier({ service, sourceHostId, targetHostId } = {}) {
+  if (!service || typeof service.verifyTargetSessionPolicy !== 'function') {
+    const error = new Error('formal DSH Session Control policy verifier is required')
+    error.code = 'EXECUTION_POLICY_VERIFIER_REQUIRED'
+    throw error
+  }
+  return {
+    async verifyTargetSessionPolicy({ policy } = {}) {
+      const result = await service.verifyTargetSessionPolicy({
+        targetSessionId: policy?.targetSessionId,
+        permission: policy?.permission,
+        workspaceRoot: policy?.workspaceRoot,
+      }, {
+        sourceHostId,
+        sourceSessionId: policy?.sourceSessionId,
+        targetHostId,
+      })
+      if (!result || result.verified !== true || result.authority !== 'dsh-session-control') {
+        const error = new Error('formal DSH Session Control did not verify the target Session policy')
+        error.code = 'EXECUTION_POLICY_UNTRUSTED'
+        throw error
+      }
+      return result
+    },
+  }
 }
 
 export function supportsExecutionPolicy(channel, policy) {
@@ -64,3 +123,4 @@ export function unsupportedPermissionPolicy(channelId, policy, capabilities, det
 
 export const EXECUTION_PERMISSIONS = PERMISSIONS
 export const EXECUTION_APPROVAL_OWNERS = APPROVAL_OWNERS
+export const EXECUTION_POLICY_PROVENANCE_AUTHORITIES = PROVENANCE_AUTHORITIES

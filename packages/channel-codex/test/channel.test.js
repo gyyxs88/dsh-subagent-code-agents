@@ -23,7 +23,8 @@ const BYPASS = '--dangerously-bypass-approvals-and-sandbox'
 const FULL_ACCESS_POLICY = Object.freeze({
   permission: 'danger-full-access',
   approvalOwner: 'full-access-controller',
-  approvalMode: 'controller-fingerprint',
+  approvalMode: 'controller-verified',
+  provenance: { authority: 'dsh-session-control', verified: true },
   workspaceRoot: 'C:/ws',
 })
 
@@ -68,8 +69,9 @@ test('codex argv uses the explicit Full Access policy exactly once', () => {
 test('codex restricted policies never emit Full Access bypass', () => {
   const readOnly = codexExecutionPolicyArgv({ permission: 'read-only' })
   const workspaceWrite = codexExecutionPolicyArgv({ permission: 'workspace-write' })
-  assert.deepEqual(readOnly, ['--sandbox', 'read-only', '--ask-for-approval', 'on-request'])
-  assert.deepEqual(workspaceWrite, ['--sandbox', 'workspace-write', '--ask-for-approval', 'on-request'])
+  assert.deepEqual(readOnly, ['--sandbox', 'read-only', '-c', 'approval_policy="on-request"'])
+  assert.deepEqual(workspaceWrite, ['--sandbox', 'workspace-write', '-c', 'approval_policy="on-request"'])
+  assert.equal(readOnly.includes('--ask-for-approval'), false)
   assert.equal(readOnly.includes(BYPASS), false)
   assert.equal(workspaceWrite.includes(BYPASS), false)
 })
@@ -522,6 +524,87 @@ test('createCodexAppServerChannel run delegates to codex exec with bypass', asyn
   assert.ok(spawned.argv.includes(BYPASS))
 })
 
+test('Workspace Write run uses Codex app-server turn and target-session approval bridge', async () => {
+  const approvals = []
+  const policy = {
+    permission: 'workspace-write',
+    approvalOwner: 'target-session',
+    approvalMode: 'target-session',
+    sourceSessionId: 'controller-a',
+    targetSessionId: 'target-a',
+    provenance: { authority: 'dsh-session-control', verified: true },
+    workspaceRoot: 'C:/ws',
+    approvalHandler: async (request) => { approvals.push(request); return { approved: true } },
+  }
+  const { handle, captured } = makeScriptedSpawn((msg, processHandle) => {
+    if (msg.method === 'initialize') return setImmediate(() => processHandle._data(Buffer.from(JSON.stringify({ id: msg.id, result: {} }) + '\n')))
+    if (msg.method === 'thread/start') return setImmediate(() => processHandle._data(Buffer.from(JSON.stringify({ id: msg.id, result: { thread: { id: 'thread-a', status: { type: 'idle' } } } }) + '\n')))
+    if (msg.method === 'turn/start') {
+      setImmediate(() => {
+        processHandle._data(Buffer.from(JSON.stringify({ id: msg.id, result: { turn: { id: 'turn-a', status: 'inProgress' } } }) + '\n'))
+        processHandle._data(Buffer.from(JSON.stringify({ id: 91, method: 'item/commandExecution/requestApproval', params: { itemId: 'item-a', threadId: 'thread-a', turnId: 'turn-a', startedAtMs: Date.now(), command: 'write file' } }) + '\n'))
+        processHandle._data(Buffer.from(JSON.stringify({ method: 'item/agentMessage/delta', params: { threadId: 'thread-a', turnId: 'turn-a', delta: 'app-server output' } }) + '\n'))
+        processHandle._data(Buffer.from(JSON.stringify({ method: 'turn/completed', params: { threadId: 'thread-a', turn: { id: 'turn-a', status: 'completed', items: [{ type: 'agentMessage', text: 'app-server output' }] } } }) + '\n'))
+      })
+    }
+  })
+  const env = makeEnv({ executionPolicy: policy, subprocess: { async resolveExecutable() { return 'C:/fake/codex.exe' }, spawn() { return handle } } })
+  const channel = createCodexAppServerChannel({ codexJs: 'C:/fake/bin/codex.js', appServerTurnTimeoutMs: 60_000 })
+  const result = await channel.run({ prompt: 'make a change', cwd: 'C:/ws' }, env)
+  assert.equal(result.stopReason, 'completed')
+  assert.equal(result.output, 'app-server output')
+  assert.equal(result.sessionId, 'thread-a')
+  assert.equal(result.turnId, 'turn-a')
+  assert.deepEqual(approvals.map((request) => request.kind), ['command'])
+  assert.equal(captured.stdinWrites.some((line) => JSON.parse(line).method === 'exec'), false)
+  const approvalReply = captured.stdinWrites.map((line) => JSON.parse(line)).find((message) => message.id === 91)
+  assert.deepEqual(approvalReply.result, { decision: 'accept' })
+})
+
+test('Codex app-server isolates interleaved Workspace Write approvals by target Session', async () => {
+  const approvals = []
+  const handles = new Map()
+  let nextProcess = 0
+  const subprocess = {
+    async resolveExecutable() { return 'C:/fake/codex.exe' },
+    spawn() {
+      const suffix = String.fromCharCode(97 + nextProcess++)
+      const scripted = makeScriptedSpawn((msg, processHandle) => {
+        if (msg.method === 'initialize') return setImmediate(() => processHandle._data(Buffer.from(JSON.stringify({ id: msg.id, result: {} }) + '\n')))
+        if (msg.method === 'thread/start') return setImmediate(() => processHandle._data(Buffer.from(JSON.stringify({ id: msg.id, result: { thread: { id: `thread-${suffix}`, status: { type: 'idle' } } } }) + '\n')))
+        if (msg.method === 'turn/start') {
+          const delay = suffix === 'a' ? 10 : 0
+          setTimeout(() => {
+            processHandle._data(Buffer.from(JSON.stringify({ id: msg.id, result: { turn: { id: `turn-${suffix}`, status: 'inProgress' } } }) + '\n'))
+            processHandle._data(Buffer.from(JSON.stringify({ id: 200 + nextProcess, method: 'item/fileChange/requestApproval', params: { itemId: `item-${suffix}`, threadId: `thread-${suffix}`, turnId: `turn-${suffix}`, startedAtMs: Date.now() } }) + '\n'))
+            processHandle._data(Buffer.from(JSON.stringify({ method: 'item/agentMessage/delta', params: { threadId: `thread-${suffix}`, turnId: `turn-${suffix}`, delta: `output-${suffix}` } }) + '\n'))
+            processHandle._data(Buffer.from(JSON.stringify({ method: 'turn/completed', params: { threadId: `thread-${suffix}`, turn: { id: `turn-${suffix}`, status: 'completed' } } }) + '\n'))
+          }, delay)
+        }
+      })
+      handles.set(suffix, scripted.handle)
+      return scripted.handle
+    },
+  }
+  const makePolicy = (targetSessionId) => ({
+    permission: 'workspace-write', approvalOwner: 'target-session', approvalMode: 'target-session',
+    sourceSessionId: 'controller', targetSessionId, workspaceRoot: 'C:/ws',
+    provenance: { authority: 'dsh-session-control', verified: true },
+    approvalHandler: async () => { approvals.push(targetSessionId); return { approved: true } },
+  })
+  const envA = makeEnv({ subprocess, executionPolicy: makePolicy('target-a') })
+  const envB = makeEnv({ subprocess, executionPolicy: makePolicy('target-b') })
+  const channel = createCodexAppServerChannel({ codexJs: 'C:/fake/bin/codex.js' })
+  const [a, b] = await Promise.all([
+    channel.run({ prompt: 'A', cwd: 'C:/ws' }, envA),
+    channel.run({ prompt: 'B', cwd: 'C:/ws' }, envB),
+  ])
+  assert.equal(a.output, 'output-a')
+  assert.equal(b.output, 'output-b')
+  assert.deepEqual(approvals.sort(), ['target-a', 'target-b'])
+  assert.equal(handles.size, 2)
+})
+
 // --- app-server managed-session semantics (fake JSON-RPC, no real provider) ---
 
 function makeAppServerEnv() {
@@ -769,6 +852,28 @@ test('app-server answers server-initiated requests with -32601 (never hangs)', a
     .find((m) => m && m.id === 999 && m.error)
   assert.ok(reply, 'server request must be answered')
   assert.equal(reply.error.code, -32601)
+})
+
+test('app-server handles only schema-known approval methods with typed responses', async () => {
+  const { handle, captured } = makeScriptedSpawn((msg) => {
+    if (msg.method === 'initialize') setImmediate(() => handle._data(Buffer.from(JSON.stringify({ id: msg.id, result: {} }) + '\n')))
+    else if (msg.method === 'thread/start') setImmediate(() => handle._data(Buffer.from(JSON.stringify({ id: msg.id, result: { thread: { id: 'thread-1', status: { type: 'idle' } } } }) + '\n')))
+    else if (msg.method === 'turn/start') setImmediate(() => handle._data(Buffer.from(JSON.stringify({ id: msg.id, result: { turn: { id: 'turn-1', status: 'inProgress' } } }) + '\n')))
+  })
+  const client = new AppServerClient({ spawn: () => handle, argvPrefix: ['/opt/codex'], logger: { info() {}, warn() {}, error() {} } })
+  client.setApprovalHandler(async ({ kind }) => kind === 'command' ? { approved: true } : { approved: false })
+  await client.ensureStarted()
+  await client.threadStart({ cwd: '/tmp', executionPolicy: FULL_ACCESS_POLICY })
+  await client.turnStart({ threadId: 'thread-1', input: [{ type: 'text', text: 'approval test' }], executionPolicy: FULL_ACCESS_POLICY })
+  const params = { itemId: 'item-1', threadId: 'thread-1', turnId: 'turn-1', startedAtMs: Date.now(), command: 'printf ok' }
+  handle._data(Buffer.from(JSON.stringify({ id: 1001, method: 'item/commandExecution/requestApproval', params }) + '\n'))
+  handle._data(Buffer.from(JSON.stringify({ id: 1002, method: 'item/permissions/requestApproval', params: { itemId: 'item-1', threadId: 'thread-1', turnId: 'turn-1', startedAtMs: Date.now(), cwd: '/tmp', permissions: { fileSystem: null, network: null } } }) + '\n'))
+  handle._data(Buffer.from(JSON.stringify({ id: 1003, method: 'item/something/requestApproval', params }) + '\n'))
+  await new Promise((resolve) => setImmediate(resolve))
+  const replies = captured.stdinWrites.map((line) => JSON.parse(line)).filter((message) => [1001, 1002, 1003].includes(message.id))
+  assert.deepEqual(replies.find((message) => message.id === 1001).result, { decision: 'accept' })
+  assert.equal(replies.find((message) => message.id === 1002).error.code, -32000)
+  assert.equal(replies.find((message) => message.id === 1003).error.code, -32601)
 })
 
 test('app-server request timeout marks outcomeUnknown (mutation may have applied)', async () => {

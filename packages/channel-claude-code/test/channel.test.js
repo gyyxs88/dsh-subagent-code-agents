@@ -9,6 +9,8 @@ import {
   claudeExecutionPolicyArgv,
   claudeResumeArgv,
   createClaudeCodeChannel,
+  createClaudeCanUseTool,
+  claudeSdkOptions,
   normalizeEffort,
   parseClaudeSessionsJson,
   parseClaudeStreamLine,
@@ -19,7 +21,8 @@ import { unsupported } from '@dsh-subagent-code-agents/core'
 const FULL_ACCESS_POLICY = Object.freeze({
   permission: 'danger-full-access',
   approvalOwner: 'full-access-controller',
-  approvalMode: 'controller-fingerprint',
+  approvalMode: 'controller-verified',
+  provenance: { authority: 'dsh-session-control', verified: true },
   workspaceRoot: 'C:/ws',
 })
 
@@ -57,7 +60,7 @@ test('claudePrintArgv is safe argv (no shell), fixed permission exactly once', (
 
 test('Claude restricted policies map to official modes instead of bypass', () => {
   assert.deepEqual(claudeExecutionPolicyArgv({ permission: 'read-only' }), ['--permission-mode', 'plan'])
-  assert.deepEqual(claudeExecutionPolicyArgv({ permission: 'workspace-write' }), ['--permission-mode', 'default'])
+  assert.deepEqual(claudeExecutionPolicyArgv({ permission: 'workspace-write' }), ['--permission-mode', 'manual'])
 })
 
 test('claudePrintArgv supports per-call model and effort', () => {
@@ -134,15 +137,15 @@ test('resolveClaudeEntry refuses a bare .cmd shim with no adjacent binary', asyn
 
 test('resolveClaudeEntry honors an explicit claudeExecutable', async () => {
   const env = makeEnv()
-  const spec = await resolveClaudeEntry(env, { claudeExecutable: 'D:/tools/claude.exe' })
-  assert.deepEqual(spec.argvPrefix, ['D:/tools/claude.exe'])
+  const spec = await resolveClaudeEntry(env, { claudeExecutable: '/opt/tools/claude' })
+  assert.deepEqual(spec.argvPrefix, ['/opt/tools/claude'])
 })
 
 test('parseClaudeSessionsJson is bounded and cwd-aware', () => {
   const parsed = parseClaudeSessionsJson(
     JSON.stringify([
       { session_id: 'a', summary: 'A'.repeat(500), cwd: 'C:/ws' },
-      { id: 'b', cwd: 'D:/other' },
+      { id: 'b', cwd: '/workspace/other' },
     ]),
   )
   assert.equal(parsed.length, 2)
@@ -168,6 +171,34 @@ test('claude channel capabilities: SDK sessions + managed/cancel + sandbox off, 
 test('Claude effort is restricted to SDK-supported values', () => {
   assert.equal(normalizeEffort(' XHIGH '), 'xhigh')
   assert.throws(() => normalizeEffort('extreme'), /low, medium, high, xhigh, max/)
+})
+
+test('Claude restricted SDK options hard-fail when sandbox is unavailable', async () => {
+  const policy = { permission: 'read-only', approvalOwner: 'target-session', approvalMode: 'target-session', workspaceRoot: 'C:/ws', provenance: { authority: 'dsh-session-control', verified: true } }
+  const options = await claudeSdkOptions({ env: makeEnv({ executionPolicy: policy }), options: { claudeExecutable: 'C:/fake/bin/claude.exe' }, request: { cwd: 'C:/ws' } })
+  assert.deepEqual(options.sandbox, { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false })
+  assert.equal(typeof options.canUseTool, 'function')
+})
+
+test('Claude Read Only callback cannot be overridden into writing or network tools', async () => {
+  let called = 0
+  const policy = { permission: 'read-only', approvalOwner: 'target-session', approvalMode: 'target-session', workspaceRoot: 'C:/ws', provenance: { authority: 'dsh-session-control', verified: true }, approvalHandler: async () => { called += 1; return { approved: true } } }
+  const handler = createClaudeCanUseTool(policy)
+  assert.deepEqual(await handler('Read', { file_path: 'C:/ws/a.txt' }), { behavior: 'allow' })
+  assert.equal((await handler('Edit', { file_path: 'C:/ws/a.txt' })).behavior, 'deny')
+  assert.equal((await handler('Bash', { command: 'echo bad > a.txt' })).behavior, 'deny')
+  assert.equal((await handler('mcp__server__write', {})).behavior, 'deny')
+  assert.equal((await handler('WebFetch', { url: 'https://example.com' })).behavior, 'deny')
+  assert.equal(called, 0)
+})
+
+test('Claude Workspace Write delegates only to the target-session callback', async () => {
+  const calls = []
+  const policy = { permission: 'workspace-write', approvalOwner: 'target-session', approvalMode: 'target-session', workspaceRoot: 'C:/ws', sourceSessionId: 'child', targetSessionId: 'child', provenance: { authority: 'dsh-session-control', verified: true }, approvalHandler: async (input) => { calls.push(input); return { approved: true } } }
+  const handler = createClaudeCanUseTool(policy)
+  assert.deepEqual(await handler('Edit', { file_path: '/workspace/ws/a.txt' }, { toolUseID: 't1' }), { behavior: 'allow' })
+  assert.equal(calls[0].targetSessionId, 'child')
+  assert.equal((await handler('WebFetch', {})).behavior, 'deny')
 })
 
 test('unsupported capability produces explicit structured refusal (no fallback)', () => {

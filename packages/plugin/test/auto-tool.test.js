@@ -221,7 +221,7 @@ test('auto-mounted subagent_code uses the host-injected service across agent iso
     const agent = {
       id: 'isolated-agent',
       ctx: agentCtx,
-      session: { header: { cwd: 'D:\\test' } },
+      session: { header: { cwd: '/workspace/test' } },
     }
     agents.push(agent)
     assert.throws(() => agentCtx.subagents, /cannot get property "subagents" without inject/)

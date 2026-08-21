@@ -12,7 +12,7 @@
 
 import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { hasCapability, normalizeExecutionPolicy, registry, unsupported } from '@dsh-subagent-code-agents/core'
+import { TRUSTED_EXECUTION_POLICY, hasCapability, normalizeExecutionPolicy, registry, unsupported } from '@dsh-subagent-code-agents/core'
 import { loadRoleRegistry, resolveRoleInvocation } from './roles.js'
 import { defaultRunRegistryPath, jobOutcomeFor, OwnedRunRegistry, sharedOwnedRunRegistry } from './owned-runs.js'
 
@@ -112,11 +112,26 @@ function parentCwdOf(exec) {
   return (header && header.cwd) || (meta && meta.cwd)
 }
 
-function executionPolicyForAgent(exec, request, config) {
+async function executionPolicyForAgent(exec, request, config) {
   const resolved = typeof config.executionPolicyResolver === 'function'
-    ? config.executionPolicyResolver({ exec, request })
+    ? await config.executionPolicyResolver({ exec, request })
     : undefined
-  if (resolved !== undefined) return normalizeExecutionPolicy(resolved, { cwd: request.cwd ?? parentCwdOf(exec) })
+  if (resolved !== undefined) {
+    const normalized = normalizeExecutionPolicy({
+      ...resolved,
+      provenance: { authority: 'unverified-local', verified: false },
+    }, { cwd: request.cwd ?? parentCwdOf(exec) })
+    const verifier = config.executionPolicyVerifier
+    const verification = verifier && typeof verifier.verifyTargetSessionPolicy === 'function'
+      ? await verifier.verifyTargetSessionPolicy({ exec, request, policy: normalized })
+      : null
+    if (!verification || verification.verified !== true || verification.authority !== 'dsh-session-control' || verification.permission !== normalized.permission || verification.workspaceRoot !== normalized.workspaceRoot || verification.sourceSessionId !== normalized.sourceSessionId || verification.targetSessionId !== normalized.targetSessionId) {
+      const error = new Error('execution policy resolver is not verified by DSH Session Control')
+      error.code = 'EXECUTION_POLICY_UNTRUSTED'
+      throw error
+    }
+    return { ...normalized, provenance: { authority: 'dsh-session-control', verified: true } }
+  }
   const agent = exec?.agent
   const permission = agent?.permission?.preset
     ?? agent?.session?.permission?.preset
@@ -128,10 +143,10 @@ function executionPolicyForAgent(exec, request, config) {
     permission,
     workspaceRoot: request.cwd ?? parentCwdOf(exec),
     approvalOwner: permission === 'danger-full-access' ? 'full-access-controller' : 'target-session',
-    approvalMode: permission === 'danger-full-access' ? 'controller-fingerprint' : 'target-session',
+    approvalMode: permission === 'danger-full-access' ? 'controller-verified' : 'target-session',
+    provenance: { authority: 'unverified-local', verified: false },
     sourceSessionId: agent?.session?.id,
     targetSessionId: agent?.session?.id,
-    approvalHandler: config.approvalHandler ?? agent?.approvalHandler,
   }, { cwd: request.cwd ?? parentCwdOf(exec) })
 }
 
@@ -147,6 +162,11 @@ export function apply(ctx, config = {}, injected = {}) {
   // context. The host auto-mount policy passes its already-injected service
   // because an agent scope may intentionally isolate `subagents`.
   const subagents = injected.subagents ?? ctx.subagents
+  const policyConfig = {
+    ...config,
+    executionPolicyResolver: ctx.get?.('dshSessionControlExecutionPolicyResolver'),
+    executionPolicyVerifier: ctx.get?.('dshSessionControlExecutionPolicyVerifier'),
+  }
   const providerPrefix = config.providerPrefix ?? 'coding-agent'
   const backgroundEnabled = config.enableRunInBackground !== false
   const roles = loadRoleRegistry(config)
@@ -300,6 +320,7 @@ export function apply(ctx, config = {}, injected = {}) {
             if (!hasCapability(channel, 'run')) {
               return unsupported(channel.id, 'run', channel.capabilities)
             }
+            const executionPolicy = await executionPolicyForAgent(exec, { cwd: parentCwdOf(exec) }, policyConfig)
             const request = {
               label: args.description,
               prompt: [{ type: 'text', text: invocation.prompt }],
@@ -308,7 +329,8 @@ export function apply(ctx, config = {}, injected = {}) {
               reasoningEffort: invocation.reasoningEffort,
               resumeSessionId: args.resume_session_id,
               cwd: parentCwdOf(exec),
-              executionPolicy: executionPolicyForAgent(exec, { cwd: parentCwdOf(exec) }, config),
+              executionPolicy,
+              [TRUSTED_EXECUTION_POLICY]: executionPolicy,
             }
             const providerName = `${providerPrefix}/${channel.id}`
             if (args.run_in_background === true) {
@@ -398,7 +420,7 @@ export function apply(ctx, config = {}, injected = {}) {
             prompt: args.prompt,
             model: args.model,
             reasoningEffort: args.reasoning_effort,
-            executionPolicy: executionPolicyForAgent(exec, { cwd: args.cwd ?? parentCwdOf(exec) }, config),
+            executionPolicy: await executionPolicyForAgent(exec, { cwd: args.cwd ?? parentCwdOf(exec) }, policyConfig),
           })
         },
       },
@@ -510,7 +532,7 @@ export function apply(ctx, config = {}, injected = {}) {
           model: { type: 'string', description: 'Optional model override for this continuation.' },
           reasoning_effort: { type: 'string', description: 'Optional reasoning-effort override for this continuation.' },
         },
-        execute(args, exec) {
+        async execute(args, exec) {
           const previous = ownedRuns.read(args.run_id, registry)
           if (!previous) throw new Error(`unknown owned run "${args.run_id}"`)
           if (previous.continuation !== 'resume_available') {
@@ -546,6 +568,7 @@ export function apply(ctx, config = {}, injected = {}) {
             return unsupported(channel.id, 'effortOverride', channel.capabilities)
           }
           const label = args.description ?? `resume ${previous.label}`
+          const executionPolicy = await executionPolicyForAgent(exec, { cwd: previous.cwd ?? parentCwdOf(exec) }, policyConfig)
           const request = {
             label,
             prompt: [{ type: 'text', text: invocation.prompt }],
@@ -554,7 +577,8 @@ export function apply(ctx, config = {}, injected = {}) {
             reasoningEffort: invocation.reasoningEffort,
             resumeSessionId: previous.sessionId,
             cwd: previous.cwd ?? parentCwdOf(exec),
-            executionPolicy: executionPolicyForAgent(exec, { cwd: previous.cwd ?? parentCwdOf(exec) }, config),
+            executionPolicy,
+            [TRUSTED_EXECUTION_POLICY]: executionPolicy,
           }
           return startOwnedBackground({
             jobs: requireJobs(),
