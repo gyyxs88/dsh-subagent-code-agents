@@ -32,6 +32,7 @@
  *   modelOverride: boolean,
  *   effortOverride: boolean,
  *   sandboxBypassGuaranteed: boolean,
+ *   executionPolicies: Record<string, boolean>,
  * }} ChannelCapabilities
  */
 
@@ -47,6 +48,7 @@
  *   delivery?: 'managed_turn_started'|'steered'|'resume_unmanaged'|'external_or_idle'|'refused'|'failed',
  *   mayBeConcurrent?: boolean,
  *   capabilities: ChannelCapabilities,
+ *   errorCode?: string,
  * }} ChannelResult
  */
 
@@ -93,6 +95,7 @@
  *   onUpdate?: (update: ChannelUpdate) => void,
  *   cwd?: string,
  *   tmpdir?: string,
+ *   executionPolicy?: import('./execution-policy.js').ChannelExecutionPolicy,
  * }} RuntimeEnv
  */
 
@@ -114,6 +117,7 @@ export const CAPABILITY_KEYS = Object.freeze([
 export function emptyCapabilities() {
   const caps = {}
   for (const key of CAPABILITY_KEYS) caps[key] = false
+  caps.executionPolicies = {}
   return caps
 }
 
@@ -315,3 +319,5 @@ export function tryRegister(channel) {
     return error
   }
 }
+
+export * from './execution-policy.js'

@@ -14,6 +14,7 @@ export interface ChannelCapabilities {
   modelOverride: boolean
   effortOverride: boolean
   sandboxBypassGuaranteed: boolean
+  executionPolicies: Record<string, boolean>
 }
 
 export interface ChannelResult {
@@ -32,6 +33,7 @@ export interface ChannelResult {
     | 'failed'
   mayBeConcurrent?: boolean
   capabilities: ChannelCapabilities
+  errorCode?: string
 }
 
 export interface ChannelUpdate {
@@ -53,6 +55,8 @@ export interface RunEnv {
   cwd?: string
   /** Temp directory override (channels default to os.tmpdir()). */
   tmpdir?: string
+  executionPolicy?: ChannelExecutionPolicy
+  runtimeManager?: RuntimeManager
 }
 
 export interface RunRequest {
@@ -65,6 +69,25 @@ export interface RunRequest {
   parentCwd?: string
   /** Background job id when run via the jobs service. */
   background?: boolean
+  executionPolicy?: ChannelExecutionPolicy
+  runtimeRequirement?: RuntimeRequirement
+}
+
+export interface RuntimeRequirement {
+  id: string
+  version: string
+  placement?: 'remote' | 'both'
+  target?: string
+  executablePath?: string
+  driver?: string
+  [key: string]: unknown
+}
+
+export interface RuntimeManager {
+  inspect(requirements: RuntimeRequirement[]): Promise<unknown>
+  ensure(requirements: RuntimeRequirement[], options?: { runtimeSync?: unknown }): Promise<unknown>
+  resolveExecutable(requirement: RuntimeRequirement): Promise<{ executable: string; state: string; auth?: unknown; runtime?: RuntimeRequirement }>
+  authChallenge(requirement: RuntimeRequirement, options?: { output?: string | null }): Promise<unknown>
 }
 
 export interface ListSessionsOptions {
@@ -138,3 +161,22 @@ export class ChannelRegistry {
 
 export const registry: ChannelRegistry
 export function tryRegister(channel: CodingAgentChannel): CodingAgentChannel | Error
+
+export interface ChannelExecutionPolicy {
+  permission: 'read-only' | 'workspace-write' | 'danger-full-access'
+  approvalOwner: 'target-session' | 'full-access-controller'
+  approvalMode?: 'target-session' | 'controller-fingerprint'
+  workspaceRoot: string
+  sourceSessionId?: string
+  targetSessionId?: string
+  operationId?: string
+  requestFingerprint?: string
+  approvalHandler?: (request: unknown) => Promise<unknown> | unknown
+}
+
+export function normalizeExecutionPolicy(value: unknown, options?: { cwd?: string }): ChannelExecutionPolicy
+export function executionPolicyFor(request: unknown, env: RunEnv, cwd?: string): ChannelExecutionPolicy
+export function supportsExecutionPolicy(channel: CodingAgentChannel, policy: ChannelExecutionPolicy): boolean
+export function unsupportedPermissionPolicy(channelId: string, policy: ChannelExecutionPolicy | undefined, capabilities: ChannelCapabilities, detail?: string): ChannelResult & { errorCode: string }
+export const EXECUTION_PERMISSIONS: readonly string[]
+export const EXECUTION_APPROVAL_OWNERS: readonly string[]

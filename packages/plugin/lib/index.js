@@ -37,15 +37,18 @@ export const CHANNEL_FACTORIES = Object.freeze({
       codexJs: cfg.codexJs,
       appServerRequestTimeoutMs: cfg.appServerRequestTimeoutMs,
       cwd: cfg.cwd,
+      runtimeRequirement: cfg.runtimeRequirement,
     }),
   'claude-code': (cfg) => createClaudeCodeChannel({
     claudeExecutable: cfg.claudeExecutable,
     managedInitTimeoutMs: cfg.managedInitTimeoutMs,
+    runtimeRequirement: cfg.runtimeRequirement,
   }),
   'grok-build': (cfg) => createGrokBuildChannel({
     grokExecutable: cfg.grokExecutable,
     grokHome: cfg.grokHome,
     managedRequestTimeoutMs: cfg.managedRequestTimeoutMs,
+    runtimeRequirement: cfg.runtimeRequirement,
   }),
   acp: (cfg) => createAcpChannel({
     id: cfg.id ?? cfg.name,
@@ -55,6 +58,8 @@ export const CHANNEL_FACTORIES = Object.freeze({
     env: cfg.env,
     cwd: cfg.cwd,
     requestTimeoutMs: cfg.requestTimeoutMs,
+    runtimeRequirement: cfg.runtimeRequirement,
+    executionPolicies: cfg.executionPolicies,
   }),
 })
 
@@ -74,6 +79,8 @@ export function runtimeEnvFor(ctx, config = {}) {
     path,
     logger: ctx.logger,
     cwd: config.cwd,
+    runtimeManager: config.runtimeManager ?? ctx.runtimeManager,
+    executionPolicy: config.executionPolicy,
   }
 }
 
@@ -187,6 +194,7 @@ export function providerFromChannel(channel, env, providerName) {
         cwd: request.cwd,
         parentCwd: parentCwdOf(request),
         background: request.background === true,
+        executionPolicy: request.executionPolicy,
       }
       const signal = request.signal
       const updates = new ChannelUpdateQueue()

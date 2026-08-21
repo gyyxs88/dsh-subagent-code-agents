@@ -6,6 +6,7 @@ import test from 'node:test'
 import {
   codexExecArgv,
   codexExecResumeArgv,
+  codexExecutionPolicyArgv,
   codexInvocationArgs,
   createCodexChannel,
   CODEX_FIXED_SANDBOX_ARGV,
@@ -14,11 +15,21 @@ import {
 import {
   AppServerClient,
   classifyThreadStatus,
-  createCodexAppServerChannel,
+  createCodexAppServerChannel as createRawCodexAppServerChannel,
   THREAD_STATUS,
 } from '../lib/app-server-channel.js'
 
 const BYPASS = '--dangerously-bypass-approvals-and-sandbox'
+const FULL_ACCESS_POLICY = Object.freeze({
+  permission: 'danger-full-access',
+  approvalOwner: 'full-access-controller',
+  approvalMode: 'controller-fingerprint',
+  workspaceRoot: 'C:/ws',
+})
+
+function createCodexAppServerChannel(options = {}) {
+  return createRawCodexAppServerChannel({ nodeExecutable: 'C:/fake/node.exe', ...options })
+}
 
 function countOf(argv, needle) {
   return argv.filter((arg) => arg === needle).length
@@ -39,18 +50,28 @@ function makeEnv(overrides = {}) {
     path,
     logger: { info() {}, warn() {}, error() {} },
     cwd: 'C:/ws',
+    executionPolicy: FULL_ACCESS_POLICY,
     ...overrides,
   }
 }
 
 // --- argv / capability tests (pure, no spawn) ---
 
-test('codex argv keeps the fixed bypass flag exactly once', () => {
-  const argv = codexExecArgv({ node: 'node', js: 'codex.js', cwd: 'C:/ws', request: {} })
+test('codex argv uses the explicit Full Access policy exactly once', () => {
+  const argv = codexExecArgv({ node: 'node', js: 'codex.js', cwd: 'C:/ws', request: {}, executionPolicy: FULL_ACCESS_POLICY })
   assert.equal(countOf(argv, BYPASS), 1)
   assert.equal(countOf(argv, '--approve-for-me'), 0)
   assert.equal(countOf(argv, '-s'), 0)
   assert.deepEqual(CODEX_FIXED_SANDBOX_ARGV, [BYPASS])
+})
+
+test('codex restricted policies never emit Full Access bypass', () => {
+  const readOnly = codexExecutionPolicyArgv({ permission: 'read-only' })
+  const workspaceWrite = codexExecutionPolicyArgv({ permission: 'workspace-write' })
+  assert.deepEqual(readOnly, ['--sandbox', 'read-only', '--ask-for-approval', 'on-request'])
+  assert.deepEqual(workspaceWrite, ['--sandbox', 'workspace-write', '--ask-for-approval', 'on-request'])
+  assert.equal(readOnly.includes(BYPASS), false)
+  assert.equal(workspaceWrite.includes(BYPASS), false)
 })
 
 test('codex argv supports per-call model and effort', () => {
@@ -58,7 +79,7 @@ test('codex argv supports per-call model and effort', () => {
     node: 'node',
     js: 'codex.js',
     cwd: 'C:/ws',
-    request: { model: 'gpt-5.6-sol', reasoningEffort: 'xhigh' },
+    request: { model: 'gpt-5.6-sol', reasoningEffort: 'xhigh' }, executionPolicy: FULL_ACCESS_POLICY,
   })
   assert.deepEqual(argv, [
     'node',
@@ -83,6 +104,7 @@ test('codex argv supports a native POSIX executable prefix', () => {
     argvPrefix: ['/opt/homebrew/bin/codex'],
     cwd: '/Users/test/project',
     request: {},
+    executionPolicy: { ...FULL_ACCESS_POLICY, workspaceRoot: '/Users/test/project' },
   })
   assert.deepEqual(argv.slice(0, 4), ['/opt/homebrew/bin/codex', 'exec', '--json', '--skip-git-repo-check'])
   assert.equal(countOf(argv, BYPASS), 1)
@@ -93,7 +115,7 @@ test('codex resume argv uses resume subcommand, stdin prompt, fixed bypass', () 
     node: 'node',
     js: 'codex.js',
     sessionId: 'thr_abc',
-    request: { model: 'gpt-5.6-sol' },
+    request: { model: 'gpt-5.6-sol' }, executionPolicy: FULL_ACCESS_POLICY,
   })
   assert.deepEqual(argv, [
     'node',
@@ -109,7 +131,7 @@ test('codex resume argv uses resume subcommand, stdin prompt, fixed bypass', () 
     BYPASS,
   ])
   assert.throws(
-    () => codexExecResumeArgv({ node: 'node', js: 'codex.js', sessionId: '', request: {} }),
+    () => codexExecResumeArgv({ node: 'node', js: 'codex.js', sessionId: '', request: {}, executionPolicy: FULL_ACCESS_POLICY }),
     /non-empty session id/,
   )
 })
@@ -119,13 +141,12 @@ test('codexInvocationArgs validates effort', () => {
   assert.deepEqual(codexInvocationArgs({}), [])
 })
 
-test('resolveCodexEntry invokes a POSIX/Homebrew launcher directly without resolving node', async () => {
+test('resolveCodexEntry uses the injected absolute Runtime Manager executable', async () => {
   const resolved = []
   const env = makeEnv({
     subprocess: {
       async resolveExecutable(name) {
         resolved.push(name)
-        if (name === 'codex') return '/opt/homebrew/bin/codex'
         throw new Error(`unexpected executable lookup: ${name}`)
       },
       spawn() {
@@ -133,36 +154,23 @@ test('resolveCodexEntry invokes a POSIX/Homebrew launcher directly without resol
       },
     },
   })
-  const entry = await resolveCodexEntry(env)
+  env.runtimeManager = { async resolveExecutable() { return { executable: '/opt/homebrew/bin/codex', state: 'installed-auth-unverified' } } }
+  const entry = await resolveCodexEntry(env, { runtimeRequirement: { id: 'codex', version: '1.0.0' } })
   assert.deepEqual(entry.argvPrefix, ['/opt/homebrew/bin/codex'])
   assert.equal(entry.executable, '/opt/homebrew/bin/codex')
-  assert.deepEqual(resolved, ['codex'])
+  assert.deepEqual(resolved, [])
 })
 
-test('resolveCodexEntry keeps the Windows npm shim fallback to node + codex.js', async () => {
-  let candidate
+test('resolveCodexEntry refuses PATH and shell-shim discovery without Runtime Manager', async () => {
   const env = makeEnv({
     subprocess: {
-      async resolveExecutable(name) {
-        if (name === 'codex') return 'C:\\fake\\bin\\codex.cmd'
-        if (name === 'node') return 'C:\\fake\\node.exe'
-        throw new Error(`unexpected executable lookup: ${name}`)
-      },
+      async resolveExecutable() { return 'C:\\fake\\bin\\codex.cmd' },
       spawn() {
         throw new Error('spawn not stubbed')
       },
     },
-    fs: {
-      existsSync(value) {
-        candidate = value
-        return true
-      },
-    },
-    path: path.win32,
   })
-  const entry = await resolveCodexEntry(env)
-  assert.equal(candidate, 'C:\\fake\\bin\\node_modules\\@openai\\codex\\bin\\codex.js')
-  assert.deepEqual(entry.argvPrefix, ['C:\\fake\\node.exe', candidate])
+  await assert.rejects(resolveCodexEntry(env), /Runtime Manager.*PATH resolution is disabled/)
 })
 
 test('resolveCodexEntry accepts an explicit native executable and rejects ambiguous config', async () => {

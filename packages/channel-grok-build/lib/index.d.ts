@@ -2,7 +2,7 @@
  * @dsh-subagent-code-agents/channel-grok-build type declarations.
  */
 
-import type { ChannelCapabilities, CodingAgentChannel, RunEnv, RunRequest } from '@dsh-subagent-code-agents/core'
+import type { ChannelCapabilities, ChannelExecutionPolicy, CodingAgentChannel, RunEnv, RunRequest, RuntimeRequirement } from '@dsh-subagent-code-agents/core'
 
 export const CHANNEL_ID: 'grok-build'
 export const GROK_FIXED_PERMISSION_ARGV: readonly ['--permission-mode', 'bypassPermissions']
@@ -10,11 +10,11 @@ export const GROK_FIXED_SANDBOX_ARGV: readonly ['--sandbox', 'off']
 
 export function normalizeModel(value: string | undefined): string | undefined
 export function normalizeEffort(value: string | undefined): string | undefined
-export function grokPrintArgv(opts: { grok: string; cwd?: string; request: unknown; prompt: string }): string[]
-export function grokPromptFileArgv(opts: { grok: string; cwd?: string; request: unknown; promptFile: string }): string[]
-export function grokResumeArgv(opts: { grok: string; sessionId: string; cwd?: string; request: unknown; prompt: string }): string[]
-export function grokResumePromptFileArgv(opts: { grok: string; sessionId: string; cwd?: string; request: unknown; promptFile: string }): string[]
-export function grokAgentStdioArgv(opts: { grok: string; model?: string; reasoningEffort?: string }): string[]
+export function grokPrintArgv(opts: { grok: string; cwd?: string; request: unknown; prompt: string; executionPolicy: ChannelExecutionPolicy }): string[]
+export function grokPromptFileArgv(opts: { grok: string; cwd?: string; request: unknown; promptFile: string; executionPolicy: ChannelExecutionPolicy }): string[]
+export function grokResumeArgv(opts: { grok: string; sessionId: string; cwd?: string; request: unknown; prompt: string; executionPolicy: ChannelExecutionPolicy }): string[]
+export function grokResumePromptFileArgv(opts: { grok: string; sessionId: string; cwd?: string; request: unknown; promptFile: string; executionPolicy: ChannelExecutionPolicy }): string[]
+export function grokAgentStdioArgv(opts: { grok: string; model?: string; reasoningEffort?: string; executionPolicy: ChannelExecutionPolicy }): string[]
 export function resolveGrok(env: RunEnv, request?: unknown): Promise<string>
 export function writePromptFileIfNeeded(opts: { env: RunEnv; prompt: string }): Promise<string | undefined>
 export function cleanupPromptFile(opts: { fs: unknown; path: unknown; file?: string }): void
@@ -28,6 +28,7 @@ export function readGrokSession(opts: { env: RunEnv; grokHome: string; sessionId
 export function grokChannelCapabilities(): ChannelCapabilities
 export interface GrokBuildChannelOptions {
   grokExecutable?: string
+  runtimeRequirement?: RuntimeRequirement
   grokHome?: string
   managedRequestTimeoutMs?: number
 }

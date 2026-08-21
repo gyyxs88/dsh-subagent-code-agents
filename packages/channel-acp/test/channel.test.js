@@ -3,7 +3,18 @@ import fs from 'node:fs'
 import path from 'node:path'
 import test from 'node:test'
 
-import { createAcpChannel, normalizeAcpChannelId } from '../lib/index.js'
+import { createAcpChannel as createRawAcpChannel, normalizeAcpChannelId } from '../lib/index.js'
+
+const FULL_ACCESS_POLICY = Object.freeze({
+  permission: 'danger-full-access',
+  approvalOwner: 'full-access-controller',
+  approvalMode: 'controller-fingerprint',
+  workspaceRoot: 'C:/workspace',
+})
+
+function createAcpChannel(config = {}) {
+  return createRawAcpChannel({ executionPolicies: { 'danger-full-access': true }, ...config })
+}
 
 function makeHandle(script) {
   const state = { stdout: undefined, writes: [], ended: false }
@@ -50,6 +61,8 @@ function makeEnv(handle) {
     fs,
     path,
     cwd: 'C:/workspace',
+    executionPolicy: FULL_ACCESS_POLICY,
+    runtimeManager: { async resolveExecutable(requirement) { return { executable: `C:/tools/${String(requirement?.id ?? 'acp/runtime').replace(/^acp\//u, '')}.exe`, state: 'installed-auth-unverified' } } },
     logger: { info() {}, warn() {}, error() {} },
   }
 }
@@ -66,6 +79,7 @@ function standardScript({ loadSession = true, resumeSession = false, configOptio
           protocolVersion: 1,
           agentCapabilities: {
             loadSession,
+            executionPolicies: { 'danger-full-access': true },
             ...(resumeSession ? { sessionCapabilities: { resume: {} } } : {}),
           },
         },

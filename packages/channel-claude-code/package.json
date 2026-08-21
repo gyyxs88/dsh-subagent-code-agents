@@ -2,6 +2,7 @@
   "name": "@dsh-subagent-code-agents/channel-claude-code",
   "version": "0.1.0",
   "description": "Claude Code channel adapter: runs Anthropic Claude Code CLI headless behind the multi-channel coding-agent core (no DSH/Cordis dependency)",
+  "dsh": { "remote": { "runtime": { "id": "claude-code", "runtimeId": "claude-code", "version": "0.1.0", "placement": "remote", "target": "linux-x86_64", "protocolVersion": "1.0", "driver": "claude-code", "authPolicy": "driver-defined", "executablePath": "bin/claude-code", "capabilities": ["headless", "agent-sdk", "approval-callback"], "requiredBy": ["channel:claude-code"] } } },
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",

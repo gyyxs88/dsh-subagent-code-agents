@@ -7,6 +7,7 @@ import test from 'node:test'
 import {
   cleanupPromptFile,
   createGrokBuildChannel,
+  grokExecutionPolicyArgv,
   grokAgentStdioArgv,
   grokPrintArgv,
   grokPromptFileArgv,
@@ -23,6 +24,13 @@ import {
   writePromptFileIfNeeded,
 } from '../lib/index.js'
 import { unsupported } from '@dsh-subagent-code-agents/core'
+
+const FULL_ACCESS_POLICY = Object.freeze({
+  permission: 'danger-full-access',
+  approvalOwner: 'full-access-controller',
+  approvalMode: 'controller-fingerprint',
+  workspaceRoot: 'C:/ws',
+})
 
 const TMP_DIRS = []
 
@@ -48,6 +56,7 @@ function makeEnv(overrides = {}) {
     path,
     logger: { info() {}, warn() {}, error() {} },
     cwd: 'C:/ws',
+    executionPolicy: FULL_ACCESS_POLICY,
     ...overrides,
   }
 }
@@ -60,7 +69,7 @@ function assertFixedFullAccess(argv) {
 }
 
 test('grokPrintArgv is native argv (no shell), fixed full access exactly once', () => {
-  const argv = grokPrintArgv({ grok: 'grok.exe', cwd: 'C:/ws', request: {}, prompt: 'hello' })
+  const argv = grokPrintArgv({ grok: 'grok.exe', cwd: 'C:/ws', request: {}, prompt: 'hello', executionPolicy: FULL_ACCESS_POLICY })
   assert.equal(argv[0], 'grok.exe')
   assert.ok(argv.includes('-p'))
   assert.ok(argv.includes('hello'), 'short prompt must ride as the -p value')
@@ -71,12 +80,18 @@ test('grokPrintArgv is native argv (no shell), fixed full access exactly once', 
   assert.ok(!argv.some((a) => a.includes(';') || a.includes('&&') || a.includes('|')))
 })
 
+test('Grok declares Workspace Write unsupported while preserving a strict Read Only mapping', () => {
+  assert.deepEqual(grokExecutionPolicyArgv({ permission: 'read-only' }), ['--permission-mode', 'dontAsk', '--sandbox', 'strict'])
+  assert.deepEqual(grokExecutionPolicyArgv({ permission: 'workspace-write' }), ['--permission-mode', 'ask', '--sandbox', 'workspace'])
+  assert.equal(createGrokBuildChannel().capabilities.executionPolicies['workspace-write'], false)
+})
+
 test('grokPrintArgv supports model, effort and cwd', () => {
   const argv = grokPrintArgv({
     grok: 'grok.exe',
     cwd: 'C:/ws',
     request: { model: 'grok-3', reasoningEffort: 'high' },
-    prompt: 'hi',
+    prompt: 'hi', executionPolicy: FULL_ACCESS_POLICY,
   })
   assert.ok(argv.includes('-m'))
   assert.ok(argv.includes('grok-3'))
@@ -91,7 +106,7 @@ test('grokPromptFileArgv uses --prompt-file for long prompts (no -p)', () => {
     grok: 'grok.exe',
     cwd: 'C:/ws',
     request: { model: 'grok-3' },
-    promptFile: 'C:/tmp/prompt.txt',
+    promptFile: 'C:/tmp/prompt.txt', executionPolicy: FULL_ACCESS_POLICY,
   })
   assert.ok(!argv.includes('-p'), 'long prompts must not use -p')
   assert.ok(argv.includes('--prompt-file'))
@@ -101,14 +116,14 @@ test('grokPromptFileArgv uses --prompt-file for long prompts (no -p)', () => {
 })
 
 test('grokResumeArgv carries resume id, prompt, no-auto-update and fixed permission', () => {
-  const argv = grokResumeArgv({ grok: 'grok.exe', sessionId: 'grok-sess-1', cwd: 'C:/ws', request: {}, prompt: 'continue' })
+  const argv = grokResumeArgv({ grok: 'grok.exe', sessionId: 'grok-sess-1', cwd: 'C:/ws', request: {}, prompt: 'continue', executionPolicy: FULL_ACCESS_POLICY })
   assert.ok(argv.includes('--resume'))
   assert.ok(argv.includes('grok-sess-1'))
   assert.ok(argv.includes('continue'), 'resume must carry the prompt')
   assert.ok(argv.includes('--no-auto-update'))
   assertFixedFullAccess(argv)
   assert.throws(
-    () => grokResumeArgv({ grok: 'grok.exe', sessionId: '', cwd: 'C:/ws', request: {}, prompt: 'hi' }),
+    () => grokResumeArgv({ grok: 'grok.exe', sessionId: '', cwd: 'C:/ws', request: {}, prompt: 'hi', executionPolicy: FULL_ACCESS_POLICY }),
     /non-empty session id/,
   )
 })
@@ -119,7 +134,7 @@ test('grokResumePromptFileArgv combines resume + prompt-file', () => {
     sessionId: 's1',
     cwd: 'C:/ws',
     request: {},
-    promptFile: 'C:/tmp/p.txt',
+    promptFile: 'C:/tmp/p.txt', executionPolicy: FULL_ACCESS_POLICY,
   })
   assert.ok(argv.includes('--resume'))
   assert.ok(argv.includes('--prompt-file'))
@@ -224,7 +239,7 @@ test('oversized prompt is rejected before spawn', async () => {
   )
 })
 
-test('resolveGrok rejects .cmd/.ps1 shims', async () => {
+test('resolveGrok refuses PATH discovery and shell shims', async () => {
   const env = makeEnv({
     subprocess: {
       async resolveExecutable() {
@@ -232,7 +247,7 @@ test('resolveGrok rejects .cmd/.ps1 shims', async () => {
       },
     },
   })
-  await assert.rejects(resolveGrok(env, {}), /shim/)
+  await assert.rejects(resolveGrok(env, {}), /Runtime Manager.*PATH resolution is disabled/)
   await assert.rejects(resolveGrok(env, { grokExecutable: 'C:/fake/grok.ps1' }), /shim/)
 })
 
@@ -243,6 +258,7 @@ test('grokResumePromptFileArgv includes --no-auto-update', () => {
     cwd: 'C:/ws',
     request: {},
     promptFile: 'C:/tmp/p.txt',
+    executionPolicy: FULL_ACCESS_POLICY,
   })
   assert.ok(argv.includes('--no-auto-update'))
   assert.equal(argv.filter((a) => a === '--no-auto-update').length, 1)
@@ -254,9 +270,10 @@ test('grokAgentStdioArgv is isolated, full-access and carries per-call model/eff
     grok: 'grok.exe',
     model: 'grok-code-fast-1',
     reasoningEffort: 'high',
+    executionPolicy: FULL_ACCESS_POLICY,
   })
   assert.deepEqual(argv, [
-    'grok.exe', '--sandbox', 'off', '--no-auto-update',
+    'grok.exe', '--permission-mode', 'bypassPermissions', '--sandbox', 'off', '--no-auto-update',
     'agent', '--always-approve', '--no-leader',
     '--model', 'grok-code-fast-1', '--reasoning-effort', 'high', 'stdio',
   ])
@@ -398,7 +415,7 @@ test('managed Grok session uses official isolated ACP, per-call model/effort and
   let promptRequestId
   const handle = managedAcpHandle((message) => {
     if (message.method === 'initialize') {
-      return { jsonrpc: '2.0', id: message.id, result: { agentCapabilities: { loadSession: true } } }
+      return { jsonrpc: '2.0', id: message.id, result: { agentCapabilities: { loadSession: true, executionPolicies: { 'danger-full-access': true } } } }
     }
     if (message.method === 'session/new') {
       return { jsonrpc: '2.0', id: message.id, result: { sessionId: 'managed-session-1' } }
@@ -439,7 +456,7 @@ test('managed Grok session uses official isolated ACP, per-call model/effort and
   assert.equal(started.delivery, 'managed_turn_started')
   assert.equal(started.mayBeConcurrent, false)
   assert.deepEqual(handle.state.spawnSpec.argv, [
-    'C:/fake/grok.exe', '--sandbox', 'off', '--no-auto-update',
+    'C:/fake/grok.exe', '--permission-mode', 'bypassPermissions', '--sandbox', 'off', '--no-auto-update',
     'agent', '--always-approve', '--no-leader',
     '--model', 'grok-code-fast-1', '--reasoning-effort', 'high', 'stdio',
   ])

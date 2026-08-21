@@ -7,19 +7,25 @@
  * `CodingAgentChannel` interface. No DSH/Cordis dependency — everything is
  * injected via `RuntimeEnv` (`subprocess`, `fs`, `path`, `logger`, `signal`).
  *
- * Security policy (inherited from the legacy dsh-subagent-codex plugin and
- * kept identical): every CLI run passes `--dangerously-bypass-approvals-and-sandbox`
- * exactly once; `thread/start` / `turn/start` on the app-server always use
- * `approvalPolicy: "never"` + `sandboxPolicy: { type: "dangerFullAccess" }`.
- * sandboxBypassGuaranteed is therefore true for CLI runs; the app-server
- * managed path uses the same fixed policy.
+ * Security policy is inherited from the target DSH Session. Only Full Access
+ * emits bypass/dangerFullAccess arguments; restricted requests use the
+ * channel's official approval and sandbox profiles and fail closed when the
+ * target-session approval bridge is unavailable.
  */
 
-import { emptyCapabilities, registry, tryRegister } from '@dsh-subagent-code-agents/core'
+import { emptyCapabilities, executionPolicyFor, registry, supportsExecutionPolicy, tryRegister, unsupportedPermissionPolicy } from '@dsh-subagent-code-agents/core'
 
 export const CHANNEL_ID = 'codex'
 export const CODEX_REASONING_EFFORTS = Object.freeze(['low', 'medium', 'high', 'xhigh', 'ultra', 'max'])
 export const CODEX_FIXED_SANDBOX_ARGV = Object.freeze(['--dangerously-bypass-approvals-and-sandbox'])
+
+export function codexExecutionPolicyArgv(policy) {
+  if (!policy || typeof policy.permission !== 'string') throw new Error(`${PREFIX}: execution policy is required`)
+  if (policy.permission === 'danger-full-access') return [...CODEX_FIXED_SANDBOX_ARGV]
+  if (policy.permission === 'read-only') return ['--sandbox', 'read-only', '--ask-for-approval', 'on-request']
+  if (policy.permission === 'workspace-write') return ['--sandbox', 'workspace-write', '--ask-for-approval', 'on-request']
+  throw new Error(`${PREFIX}: unsupported permission policy ${policy.permission}`)
+}
 
 const PREFIX = 'channel-codex'
 const WINDOWS_SHELL_SHIM_RE = /\.(?:cmd|ps1|bat)$/iu
@@ -62,26 +68,26 @@ function codexArgvPrefix({ argvPrefix, node, js }) {
 }
 
 /**
- * Build the complete `codex exec` argv deterministically. The sandbox portion
- * is always exactly `CODEX_FIXED_SANDBOX_ARGV`.
+ * Build the complete `codex exec` argv deterministically from the inherited
+ * execution policy. The bypass constant is only valid for Full Access.
  */
-export function codexExecArgv({ argvPrefix, node, js, cwd, request }) {
+export function codexExecArgv({ argvPrefix, node, js, cwd, request, executionPolicy }) {
   return codexArgvPrefix({ argvPrefix, node, js })
     .concat('exec', '--json', '--skip-git-repo-check', '--color', 'never', '-C', cwd)
-    .concat(codexInvocationArgs(request), CODEX_FIXED_SANDBOX_ARGV)
+    .concat(codexInvocationArgs(request), codexExecutionPolicyArgv(executionPolicy))
 }
 
 /**
  * Build the complete `codex exec resume` argv. `resume` has its own option set:
  * no `--color`, no `-C`; prompt is sent on stdin (`-`).
  */
-export function codexExecResumeArgv({ argvPrefix, node, js, sessionId, request }) {
+export function codexExecResumeArgv({ argvPrefix, node, js, sessionId, request, executionPolicy }) {
   if (typeof sessionId !== 'string' || sessionId.length === 0) {
     throw new Error(`${PREFIX}: resume requires a non-empty session id`)
   }
   return codexArgvPrefix({ argvPrefix, node, js })
     .concat('exec', 'resume', sessionId, '-', '--json', '--skip-git-repo-check')
-    .concat(codexInvocationArgs(request), CODEX_FIXED_SANDBOX_ARGV)
+    .concat(codexInvocationArgs(request), codexExecutionPolicyArgv(executionPolicy))
 }
 
 /**
@@ -92,11 +98,15 @@ export function codexExecResumeArgv({ argvPrefix, node, js, sessionId, request }
 export async function runCodexExec({ env, request, resumeSessionId, capabilities: capabilitiesOverride }) {
   const cwd = request.cwd ?? request.parentCwd ?? env.cwd
   if (!cwd) throw new Error(`${PREFIX}: no working directory — set cwd or parentCwd`)
+  const policy = executionPolicyFor(request, env, cwd)
+  const capabilities = capabilitiesOverride ?? codexChannel().capabilities
+  if (!supportsExecutionPolicy({ capabilities }, policy)) return unsupportedPermissionPolicy(CHANNEL_ID, policy, capabilities)
+  if (policy.permission === 'workspace-write' && typeof policy.approvalHandler !== 'function') return unsupportedPermissionPolicy(CHANNEL_ID, policy, capabilities, 'Codex CLI has no target-session approval bridge for Workspace Write')
   const { argvPrefix } = await resolveCodexEntry(env, request)
   const argv =
     resumeSessionId === undefined
-      ? codexExecArgv({ argvPrefix, cwd, request })
-      : codexExecResumeArgv({ argvPrefix, sessionId: resumeSessionId, request })
+      ? codexExecArgv({ argvPrefix, cwd, request, executionPolicy: policy })
+      : codexExecResumeArgv({ argvPrefix, sessionId: resumeSessionId, request, executionPolicy: policy })
   const prompt = typeof request.prompt === 'string' ? request.prompt : ''
   if (!prompt.trim()) throw new Error(`${PREFIX}: prompt is required`)
 
@@ -182,7 +192,6 @@ export async function runCodexExec({ env, request, resumeSessionId, capabilities
     } catch {}
   }
 
-  const capabilities = capabilitiesOverride ?? codexChannel().capabilities
   const base = {
     channel: CHANNEL_ID,
     runId: `codex-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
@@ -211,10 +220,10 @@ export async function runCodexExec({ env, request, resumeSessionId, capabilities
 }
 
 async function resolveNode(env, configured) {
-  if (configured) return configured
-  return env.subprocess.resolveExecutable('node').catch(() => {
-    throw new Error(`${PREFIX}: cannot locate node`)
-  })
+  if (typeof configured !== 'string' || configured.length === 0 || !/^(?:[A-Za-z]:[\\/]|\/)/u.test(configured) || /[\0\r\n]/u.test(configured)) {
+    throw new Error(`${PREFIX}: codexJs requires an absolute nodeExecutable; PATH resolution is disabled`)
+  }
+  return configured
 }
 
 function validateCodexExecutable(value) {
@@ -245,35 +254,18 @@ export async function resolveCodexEntry(env, request = {}) {
     return { argvPrefix: [executable], executable }
   }
 
+  if (env.runtimeManager?.resolveExecutable) {
+    const resolved = await env.runtimeManager.resolveExecutable(request.runtimeRequirement ?? env.runtimeRequirement)
+    if (typeof resolved?.executable !== 'string' || resolved.executable.length === 0) throw new Error(`${PREFIX}: Runtime Manager returned no absolute Codex executable`)
+    return { argvPrefix: [resolved.executable], executable: resolved.executable, runtimeState: resolved.state }
+  }
+
   if (request.codexJs !== undefined) {
     const node = await resolveNode(env, request.nodeExecutable)
     return { argvPrefix: [node, request.codexJs], node, js: request.codexJs }
   }
 
-  let executable
-  try {
-    executable = await env.subprocess.resolveExecutable('codex')
-  } catch {}
-  if (typeof executable !== 'string' || executable.length === 0) {
-    throw new Error(
-      `${PREFIX}: cannot locate the Codex CLI — install it or set codexExecutable/codexJs`,
-    )
-  }
-
-  if (!WINDOWS_SHELL_SHIM_RE.test(executable)) {
-    return { argvPrefix: [executable], executable }
-  }
-
-  const sep = Math.max(executable.lastIndexOf('\\'), executable.lastIndexOf('/'))
-  const dir = sep >= 0 ? executable.slice(0, sep) : ''
-  const js = dir ? env.path.join(dir, 'node_modules', '@openai', 'codex', 'bin', 'codex.js') : undefined
-  if (js !== undefined && env.fs.existsSync(js)) {
-    const node = await resolveNode(env, request.nodeExecutable)
-    return { argvPrefix: [node, js], node, js }
-  }
-  throw new Error(
-    `${PREFIX}: codex resolves to a Windows shell shim (${executable}) but bin/codex.js was not found; set codexExecutable or codexJs`,
-  )
+  throw new Error(`${PREFIX}: Runtime Manager must provide an absolute Codex executable; PATH resolution is disabled`)
 }
 
 /**
@@ -301,18 +293,19 @@ export function createCodexChannel(options = {}) {
       modelOverride: true,
       effortOverride: true,
       sandboxBypassGuaranteed: true,
+      executionPolicies: { 'read-only': true, 'workspace-write': true, 'danger-full-access': true },
     },
     async run(request, env) {
       return runCodexExec({
         env,
-        request: { ...request, ...(options.codexExecutable ? { codexExecutable: options.codexExecutable } : {}), ...(options.nodeExecutable ? { nodeExecutable: options.nodeExecutable } : {}), ...(options.codexJs ? { codexJs: options.codexJs } : {}) },
+        request: { ...request, ...(options.codexExecutable ? { codexExecutable: options.codexExecutable } : {}), ...(options.nodeExecutable ? { nodeExecutable: options.nodeExecutable } : {}), ...(options.codexJs ? { codexJs: options.codexJs } : {}), ...(options.runtimeRequirement ? { runtimeRequirement: options.runtimeRequirement } : {}) },
         resumeSessionId: request.resumeSessionId,
       })
     },
     async resume(request, env) {
       return runCodexExec({
         env,
-        request: { ...request, ...(options.codexExecutable ? { codexExecutable: options.codexExecutable } : {}), ...(options.nodeExecutable ? { nodeExecutable: options.nodeExecutable } : {}), ...(options.codexJs ? { codexJs: options.codexJs } : {}) },
+        request: { ...request, ...(options.codexExecutable ? { codexExecutable: options.codexExecutable } : {}), ...(options.nodeExecutable ? { nodeExecutable: options.nodeExecutable } : {}), ...(options.codexJs ? { codexJs: options.codexJs } : {}), ...(options.runtimeRequirement ? { runtimeRequirement: options.runtimeRequirement } : {}) },
         resumeSessionId: request.resumeSessionId ?? request.sessionId,
       })
     },
