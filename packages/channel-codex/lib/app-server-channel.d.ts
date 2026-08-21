@@ -25,6 +25,8 @@ export interface AppServerClientOptions {
   cwd?: string
   requestTimeoutMs?: number
   logger?: { info: Function; warn: Function; error: Function }
+  approvalHandler?: (request: unknown) => Promise<unknown> | unknown
+  targetSessionId?: string
 }
 
 export class AppServerClient {
@@ -42,6 +44,7 @@ export class AppServerClient {
   threadResume(threadId: string, opts?: { model?: string }): Promise<any>
   turnStart(opts: object): Promise<any>
   turnSteer(opts: { threadId: string; input: unknown[]; expectedTurnId: string }): Promise<any>
+  waitForTurn(turnId: string, opts?: { timeoutMs?: number }): Promise<{ threadId?: string; turnId: string; status: string; output: string }>
   dispose(): Promise<void>
 }
 
@@ -55,6 +58,7 @@ export function createCodexAppServerChannel(options?: {
   nodeExecutable?: string
   codexJs?: string
   appServerRequestTimeoutMs?: number
+  appServerTurnTimeoutMs?: number
   logger?: { info: Function; warn: Function; error: Function }
   cwd?: string
 }): CodingAgentChannel

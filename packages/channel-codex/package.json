@@ -2,7 +2,7 @@
   "name": "@dsh-subagent-code-agents/channel-codex",
   "version": "0.1.0",
   "description": "Codex channel adapter: runs OpenAI Codex CLI behind the multi-channel coding-agent core (no DSH/Cordis dependency)",
-  "dsh": { "remote": { "runtime": { "id": "codex", "runtimeId": "codex", "version": "0.1.0", "placement": "remote", "target": "linux-x86_64", "protocolVersion": "1.0", "driver": "codex", "authPolicy": "remote-user", "executablePath": "bin/codex", "capabilities": ["exec", "app-server", "approval-requests"], "requiredBy": ["channel:codex"] } } },
+  "dsh": { "remote": { "channelRuntime": { "schemaVersion": "1.0", "runtimeId": "codex", "placement": "remote", "protocolVersion": "1.0", "driver": "codex", "authPolicy": "remote-user", "capabilities": ["exec", "app-server", "approval-requests"], "compatibility": { "dsh": { "min": "0.1.0-rc.6", "max": "0.1.0-rc.6" }, "api": { "min": "1.0", "max": "1.0" } } } } },
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
@@ -22,6 +22,8 @@
     "lib/index.d.ts",
     "lib/app-server-channel.js",
     "lib/app-server-channel.d.ts",
+    "lib/app-server-protocol.js",
+    "protocol/codex-0.147.0/**",
     "LICENSE"
   ],
   "scripts": {

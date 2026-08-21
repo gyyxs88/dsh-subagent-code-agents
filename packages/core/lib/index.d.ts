@@ -90,6 +90,14 @@ export interface RuntimeManager {
   authChallenge(requirement: RuntimeRequirement, options?: { output?: string | null }): Promise<unknown>
 }
 
+export class UnixSocketRuntimeManager implements RuntimeManager {
+  constructor(options: { socketPath: string; hostId: string; sourceHostId: string; sourceSessionId: string; capabilityToken?: string; capabilityTokenFile?: string; timeoutMs?: number })
+  inspect(requirements: RuntimeRequirement[]): Promise<unknown>
+  ensure(requirements: RuntimeRequirement[], options?: { runtimeSync?: unknown }): Promise<unknown>
+  resolveExecutable(requirement: RuntimeRequirement, options?: { targetSessionId?: string }): Promise<{ executable: string; state: string; auth?: unknown; runtime?: RuntimeRequirement }>
+  authChallenge(requirement: RuntimeRequirement, options?: { output?: string | null }): Promise<unknown>
+}
+
 export interface ListSessionsOptions {
   cwd?: string
   includeAll?: boolean
@@ -165,7 +173,7 @@ export function tryRegister(channel: CodingAgentChannel): CodingAgentChannel | E
 export interface ChannelExecutionPolicy {
   permission: 'read-only' | 'workspace-write' | 'danger-full-access'
   approvalOwner: 'target-session' | 'full-access-controller'
-  approvalMode?: 'target-session' | 'controller-fingerprint'
+  approvalMode?: 'target-session' | 'controller-verified'
   workspaceRoot: string
   sourceSessionId?: string
   targetSessionId?: string
@@ -176,6 +184,7 @@ export interface ChannelExecutionPolicy {
 
 export function normalizeExecutionPolicy(value: unknown, options?: { cwd?: string }): ChannelExecutionPolicy
 export function executionPolicyFor(request: unknown, env: RunEnv, cwd?: string): ChannelExecutionPolicy
+export function createSessionControlExecutionPolicyVerifier(options: { service: { verifyTargetSessionPolicy(request: unknown, context: unknown): Promise<unknown> | unknown }; sourceHostId: string; targetHostId: string }): { verifyTargetSessionPolicy(args: unknown): Promise<unknown> }
 export function supportsExecutionPolicy(channel: CodingAgentChannel, policy: ChannelExecutionPolicy): boolean
 export function unsupportedPermissionPolicy(channelId: string, policy: ChannelExecutionPolicy | undefined, capabilities: ChannelCapabilities, detail?: string): ChannelResult & { errorCode: string }
 export const EXECUTION_PERMISSIONS: readonly string[]

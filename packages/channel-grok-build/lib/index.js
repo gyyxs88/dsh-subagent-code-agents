@@ -9,10 +9,11 @@
  *   - `--cwd` working directory
  *   - long prompts sent via a safe temp prompt file (cleaned up afterwards)
  *   - Full Access uses `--permission-mode bypassPermissions` and
- *     `--sandbox off`; restricted modes use official profiles
+ *     `--sandbox off`; Read Only uses the administrator-provided
+ *     `read-only` profile plus an explicit read-tool allowlist
  *   - bounded session list/read from Grok's documented local session store
  *
- * IMPORTANT sandbox honesty: Grok Build 1.0.3 documents `--sandbox off` as
+ * IMPORTANT sandbox honesty: Grok Build documents `--sandbox off` as
  * unrestricted read/write/network access. Every run/resume argv therefore
  * carries both approval bypass and explicit sandbox off. The capability is
  * meaningful only for an explicitly inherited Full Access policy.
@@ -29,6 +30,14 @@ import { emptyCapabilities, executionPolicyFor, registry, supportsExecutionPolic
 export const CHANNEL_ID = 'grok-build'
 export const GROK_FIXED_PERMISSION_ARGV = Object.freeze(['--permission-mode', 'bypassPermissions'])
 export const GROK_FIXED_SANDBOX_ARGV = Object.freeze(['--sandbox', 'off'])
+export const GROK_READ_ONLY_ARGV = Object.freeze([
+  '--permission-mode', 'dontAsk',
+  '--sandbox', 'read-only',
+  '--tools', 'Read,Grep',
+  '--disallowed-tools', 'Edit,Write,NotebookEdit,Bash,MCP,WebSearch,WebFetch',
+  '--disable-web-search',
+  '--no-subagents',
+])
 
 const PREFIX = 'channel-grok-build'
 const PROMPT_FILE_MAX_BYTES = 256 * 1024
@@ -43,8 +52,12 @@ const DEFAULT_MANAGED_REQUEST_TIMEOUT_MS = 10 * 60_000
 export function grokExecutionPolicyArgv(policy) {
   if (!policy || typeof policy.permission !== 'string') throw new Error(`${PREFIX}: execution policy is required`)
   if (policy.permission === 'danger-full-access') return [...GROK_FIXED_PERMISSION_ARGV, ...GROK_FIXED_SANDBOX_ARGV]
-  if (policy.permission === 'read-only') return ['--permission-mode', 'dontAsk', '--sandbox', 'strict']
-  if (policy.permission === 'workspace-write') return ['--permission-mode', 'ask', '--sandbox', 'workspace']
+  if (policy.permission === 'read-only') return [...GROK_READ_ONLY_ARGV]
+  if (policy.permission === 'workspace-write') {
+    const error = new Error(`${PREFIX}: Workspace Write has no target-session approval bridge`)
+    error.code = 'UNSUPPORTED_PERMISSION_POLICY'
+    throw error
+  }
   throw new Error(`${PREFIX}: unsupported permission policy ${policy.permission}`)
 }
 
@@ -150,7 +163,7 @@ export function grokAgentStdioArgv({ grok, model, reasoningEffort, executionPoli
 /** Resolve the grok executable (native binary; reject shims like .cmd/.ps1). */
 export async function resolveGrok(env, request = {}) {
   const managed = env.runtimeManager?.resolveExecutable
-    ? await env.runtimeManager.resolveExecutable(request.runtimeRequirement ?? env.runtimeRequirement)
+    ? await env.runtimeManager.resolveExecutable(request.runtimeRequirement ?? env.runtimeRequirement, { sourceSessionId: env.executionPolicy?.sourceSessionId, targetSessionId: env.executionPolicy?.targetSessionId })
     : null
   const exe = managed?.executable ?? request.grokExecutable
   if (typeof exe !== 'string' || exe.length === 0) {

@@ -28,7 +28,8 @@ import { unsupported } from '@dsh-subagent-code-agents/core'
 const FULL_ACCESS_POLICY = Object.freeze({
   permission: 'danger-full-access',
   approvalOwner: 'full-access-controller',
-  approvalMode: 'controller-fingerprint',
+  approvalMode: 'controller-verified',
+  provenance: { authority: 'dsh-session-control', verified: true },
   workspaceRoot: 'C:/ws',
 })
 
@@ -80,9 +81,13 @@ test('grokPrintArgv is native argv (no shell), fixed full access exactly once', 
   assert.ok(!argv.some((a) => a.includes(';') || a.includes('&&') || a.includes('|')))
 })
 
-test('Grok declares Workspace Write unsupported while preserving a strict Read Only mapping', () => {
-  assert.deepEqual(grokExecutionPolicyArgv({ permission: 'read-only' }), ['--permission-mode', 'dontAsk', '--sandbox', 'strict'])
-  assert.deepEqual(grokExecutionPolicyArgv({ permission: 'workspace-write' }), ['--permission-mode', 'ask', '--sandbox', 'workspace'])
+test('Grok declares Workspace Write unsupported and uses a read-only tool allowlist', () => {
+  const readOnly = grokExecutionPolicyArgv({ permission: 'read-only' })
+  assert.ok(readOnly.includes('--sandbox') && readOnly.includes('read-only'))
+  assert.ok(readOnly.includes('--tools') && readOnly.includes('Read,Grep'))
+  assert.ok(readOnly.includes('--disallowed-tools'))
+  assert.ok(readOnly.includes('Edit,Write,NotebookEdit,Bash,MCP,WebSearch,WebFetch'))
+  assert.throws(() => grokExecutionPolicyArgv({ permission: 'workspace-write' }), /no target-session approval bridge/)
   assert.equal(createGrokBuildChannel().capabilities.executionPolicies['workspace-write'], false)
 })
 
@@ -158,7 +163,7 @@ test('parseGrokSessions filters by cwd and is bounded', () => {
   const parsed = parseGrokSessions(
     JSON.stringify([
       { id: 'a', title: 'A'.repeat(500), cwd: 'C:/ws' },
-      { id: 'b', cwd: 'D:/other' },
+      { id: 'b', cwd: '/workspace/other' },
     ]),
     { cwd: 'C:/ws' },
   )
@@ -310,7 +315,7 @@ test('listGrokSessions reads documented summaries, filters cwd, sorts and bounds
   TMP_DIRS.push(grokHome)
   writeSession(grokHome, { cwd: 'C:/ws', id: 'session-a', title: 'older', updatedAt: '2026-08-01T00:00:00Z' })
   writeSession(grokHome, { cwd: 'C:/ws', id: 'session-b', title: 'newer', updatedAt: '2026-08-02T00:00:00Z' })
-  writeSession(grokHome, { cwd: 'D:/other', id: 'session-c', title: 'other', updatedAt: '2026-08-03T00:00:00Z' })
+  writeSession(grokHome, { cwd: '/workspace/other', id: 'session-c', title: 'other', updatedAt: '2026-08-03T00:00:00Z' })
   const env = makeEnv()
 
   const local = listGrokSessions({ env, grokHome, cwd: 'c:\\WS', limit: 1 })

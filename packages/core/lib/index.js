@@ -321,3 +321,4 @@ export function tryRegister(channel) {
 }
 
 export * from './execution-policy.js'
+export * from './runtime-manager-client.js'

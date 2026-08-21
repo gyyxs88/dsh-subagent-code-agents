@@ -8,7 +8,8 @@ import { createAcpChannel as createRawAcpChannel, normalizeAcpChannelId } from '
 const FULL_ACCESS_POLICY = Object.freeze({
   permission: 'danger-full-access',
   approvalOwner: 'full-access-controller',
-  approvalMode: 'controller-fingerprint',
+  approvalMode: 'controller-verified',
+  provenance: { authority: 'dsh-session-control', verified: true },
   workspaceRoot: 'C:/workspace',
 })
 
@@ -309,7 +310,7 @@ test('ACP readSession uses load replay, message IDs and optional session/close',
     if (message.method === 'session/list') {
       return {
         jsonrpc: '2.0', id: message.id,
-        result: { sessions: [{ sessionId: 'history-1', cwd: 'D:/actual' }] },
+        result: { sessions: [{ sessionId: 'history-1', cwd: '/workspace/actual' }] },
       }
     }
     if (message.method === 'session/load') {
@@ -348,7 +349,7 @@ test('ACP readSession uses load replay, message IDs and optional session/close',
   assert.deepEqual(result.turns.map((turn) => [turn.role, turn.text]), [['user', 'question'], ['assistant', 'answer']])
   assert.equal(result.delivery, 'external_or_idle')
   const load = handle.state.writes.find((message) => message.method === 'session/load')
-  assert.equal(load.params.cwd, 'D:/actual')
+  assert.equal(load.params.cwd, '/workspace/actual')
   assert.ok(handle.state.writes.some((message) => message.method === 'session/close'))
 })
 

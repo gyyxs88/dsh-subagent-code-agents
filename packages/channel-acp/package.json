@@ -2,7 +2,7 @@
   "name": "@dsh-subagent-code-agents/channel-acp",
   "version": "0.1.0",
   "description": "Generic Agent Client Protocol channel adapter for dsh-subagent-code-agents",
-  "dsh": { "remote": { "runtime": { "id": "acp/*", "runtimeId": "acp/*", "version": "0.1.0", "placement": "remote", "target": "linux-x86_64", "protocolVersion": "1.0", "driver": "acp", "authPolicy": "driver-defined", "executablePath": "agent-defined", "capabilities": ["initialize", "auth-negotiation"], "requiredBy": ["channel:acp/*"] } } },
+  "dsh": { "remote": { "channelRuntime": { "schemaVersion": "1.0", "runtimeId": "acp/default", "placement": "remote", "protocolVersion": "1.0", "driver": "acp", "authPolicy": "driver-defined", "capabilities": ["initialize", "auth-negotiation"], "compatibility": { "dsh": { "min": "0.1.0-rc.6", "max": "0.1.0-rc.6" }, "api": { "min": "1.0", "max": "1.0" } } } } },
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",

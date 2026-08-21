@@ -25,7 +25,10 @@ export function claudeExecutionPolicyArgv(policy) {
   if (!policy || typeof policy.permission !== 'string') throw new Error(`${PREFIX}: execution policy is required`)
   if (policy.permission === 'danger-full-access') return [...CLAUDE_FIXED_PERMISSION_ARGV]
   if (policy.permission === 'read-only') return ['--permission-mode', 'plan']
-  if (policy.permission === 'workspace-write') return ['--permission-mode', 'default']
+  // Claude Code CLI 2.1.228 exposes `manual`, not the SDK-only `default`
+  // permission mode. Production execution uses the Agent SDK; this helper
+  // remains a real CLI-compatible no-charge construction for diagnostics.
+  if (policy.permission === 'workspace-write') return ['--permission-mode', 'manual']
   throw new Error(`${PREFIX}: unsupported permission policy ${policy.permission}`)
 }
 
@@ -35,6 +38,8 @@ const MAX_HISTORY_TURNS = 20
 const TRUNC_MARKER = '…[truncated]'
 const DEFAULT_MANAGED_INIT_TIMEOUT_MS = 60_000
 const CLAUDE_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max'])
+const CLAUDE_READ_ONLY_TOOLS = new Set(['Read', 'Glob', 'Grep', 'LS', 'NotebookRead', 'TodoRead'])
+const CLAUDE_ALWAYS_DENY_TOOLS = new Set(['Edit', 'Write', 'NotebookEdit', 'Bash', 'WebFetch', 'WebSearch', 'Computer', 'Task', 'Skill'])
 let defaultSdkPromise
 
 /** Sanitize a model id: non-empty, bounded, no control chars. */
@@ -110,7 +115,8 @@ export function claudeResumeArgv({ argvPrefix, sessionId, request, executionPoli
  */
 export async function resolveClaudeEntry(env, request = {}) {
   if (env.runtimeManager?.resolveExecutable) {
-    const resolved = await env.runtimeManager.resolveExecutable(request.runtimeRequirement ?? env.runtimeRequirement)
+    const runtimeRequirement = request.runtimeRequirement ?? env.runtimeRequirement
+    const resolved = await env.runtimeManager.resolveExecutable(runtimeRequirement, { sourceSessionId: env.executionPolicy?.sourceSessionId, targetSessionId: env.executionPolicy?.targetSessionId })
     if (typeof resolved?.executable !== 'string' || resolved.executable.length === 0) throw new Error(`${PREFIX}: Runtime Manager returned no absolute Claude executable`)
     return { argvPrefix: [resolved.executable], entry: resolved.executable, runtimeState: resolved.state }
   }
@@ -341,6 +347,41 @@ function assertSdkInitPolicy(message, policy) {
   if (message.permissionMode !== expected) throw new Error(`${PREFIX}: Claude Code did not enter the requested permission mode ${expected}`)
 }
 
+/**
+ * Adapt the DSH approval port to Claude Agent SDK's canUseTool contract.
+ * Read Only never delegates a write-capable or unknown tool to the caller;
+ * Workspace Write delegates only after the target-session boundary has been
+ * selected by DSH. The main/controller session is never an approval source.
+ */
+export function createClaudeCanUseTool(policy) {
+  if (!policy || typeof policy.permission !== 'string') throw new Error(`${PREFIX}: execution policy is required`)
+  if (policy.permission === 'danger-full-access') return undefined
+  const targetApproval = policy.permission === 'workspace-write' ? policy.approvalHandler : undefined
+  if (policy.permission === 'workspace-write' && typeof targetApproval !== 'function') throw new Error(`${PREFIX}: Workspace Write requires the target-session approval handler`)
+  return async (toolName, input, options = {}) => {
+    if (typeof toolName !== 'string' || (policy.permission === 'read-only' && CLAUDE_ALWAYS_DENY_TOOLS.has(toolName)) || toolName.startsWith('mcp__') || toolName.startsWith('Web')) {
+      return { behavior: 'deny', message: `DSH ${policy.permission} policy denies ${toolName || 'unknown'}` }
+    }
+    if (policy.permission === 'read-only' && !CLAUDE_READ_ONLY_TOOLS.has(toolName)) {
+      return { behavior: 'deny', message: `DSH Read Only policy denies ${toolName}` }
+    }
+    if (policy.permission === 'read-only') return { behavior: 'allow' }
+    const decision = await targetApproval({
+      channel: CHANNEL_ID,
+      toolName,
+      input,
+      toolUseID: options.toolUseID,
+      sourceSessionId: policy.sourceSessionId,
+      targetSessionId: policy.targetSessionId,
+      approvalOwner: policy.approvalOwner,
+    })
+    if (decision?.behavior === 'allow' || decision?.behavior === 'deny') return decision
+    return decision?.approved === true
+      ? { behavior: 'allow' }
+      : { behavior: 'deny', message: decision?.message ?? 'target-session approval was not granted' }
+  }
+}
+
 /** Build policy-derived Agent SDK options for one call. */
 export async function claudeSdkOptions({ env, options, request, resumeSessionId, abortController }) {
   const cwd = request.cwd ?? request.parentCwd ?? env.cwd
@@ -364,8 +405,9 @@ export async function claudeSdkOptions({ env, options, request, resumeSessionId,
     pathToClaudeCodeExecutable: entry.entry,
     ...(/\.(?:m?js|cjs)$/iu.test(entry.entry) ? { executable: 'node' } : {}),
     permissionMode: policy.permission === 'danger-full-access' ? 'bypassPermissions' : policy.permission === 'read-only' ? 'plan' : 'default',
-    ...(policy.permission === 'danger-full-access' ? { allowDangerouslySkipPermissions: true, sandbox: { enabled: false } } : { sandbox: { enabled: true } }),
-    ...(typeof policy.approvalHandler === 'function' ? { canUseTool: policy.approvalHandler } : {}),
+    ...(policy.permission === 'danger-full-access'
+      ? { allowDangerouslySkipPermissions: true, sandbox: { enabled: false } }
+      : { sandbox: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false }, canUseTool: createClaudeCanUseTool(policy) }),
     persistSession: true,
     includePartialMessages: true,
     systemPrompt: { type: 'preset', preset: 'claude_code' },

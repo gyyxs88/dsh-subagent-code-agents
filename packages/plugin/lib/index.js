@@ -18,7 +18,8 @@
 
 import fs from 'node:fs'
 import path from 'node:path'
-import { registry, tryRegister } from '@dsh-subagent-code-agents/core'
+import z from '@deepseek-ai/schemastery'
+import { TRUSTED_EXECUTION_POLICY, UnixSocketRuntimeManager, registry, tryRegister } from '@dsh-subagent-code-agents/core'
 import { createCodexChannel } from '@dsh-subagent-code-agents/channel-codex'
 import { createCodexAppServerChannel } from '@dsh-subagent-code-agents/channel-codex/app-server'
 import { createClaudeCodeChannel } from '@dsh-subagent-code-agents/channel-claude-code'
@@ -28,6 +29,21 @@ import { createAcpChannel } from '@dsh-subagent-code-agents/channel-acp'
 export const name = 'dsh-subagent-code-agents'
 export const inject = ['subagents', 'subprocess']
 
+/** Host-injected Runtime Manager connection. All four channels consume this
+ * same validated service boundary; YAML cannot inject functions or objects. */
+export const Config = z.object({
+  channels: z.array(z.dict(z.any())).default([]),
+  channel: z.string().default(''),
+  runtimeManagerSocket: z.string().default(''),
+  runtimeManagerHostId: z.string().default(''),
+  runtimeManagerSourceHostId: z.string().default(''),
+  runtimeManagerSourceSessionId: z.string().default(''),
+  runtimeManagerCapabilityTokenFile: z.string().default(''),
+  runtimeManagerTimeoutMs: z.number().step(1).min(100).default(10_000),
+  appServerRequestTimeoutMs: z.number().step(1).min(1000).default(30_000),
+  appServerTurnTimeoutMs: z.number().step(1).min(10_000).default(10 * 60_000),
+})
+
 export const CHANNEL_FACTORIES = Object.freeze({
   // Codex uses the full app-server adapter (run + resume + sessions + steer).
   codex: (cfg) =>
@@ -36,6 +52,7 @@ export const CHANNEL_FACTORIES = Object.freeze({
       nodeExecutable: cfg.nodeExecutable,
       codexJs: cfg.codexJs,
       appServerRequestTimeoutMs: cfg.appServerRequestTimeoutMs,
+      appServerTurnTimeoutMs: cfg.appServerTurnTimeoutMs,
       cwd: cfg.cwd,
       runtimeRequirement: cfg.runtimeRequirement,
     }),
@@ -70,6 +87,23 @@ export function providerNameFor(channelId) {
 
 /** Build the DSH-facing RuntimeEnv from a Cordis ctx. */
 export function runtimeEnvFor(ctx, config = {}) {
+  const hasSocket = typeof config.runtimeManagerSocket === 'string' && config.runtimeManagerSocket.length > 0
+  const hasHost = typeof config.runtimeManagerHostId === 'string' && config.runtimeManagerHostId.length > 0
+  const hasSourceHost = typeof config.runtimeManagerSourceHostId === 'string' && config.runtimeManagerSourceHostId.length > 0
+  const hasSourceSession = typeof config.runtimeManagerSourceSessionId === 'string' && config.runtimeManagerSourceSessionId.length > 0
+  const hasToken = typeof config.runtimeManagerCapabilityTokenFile === 'string' && config.runtimeManagerCapabilityTokenFile.length > 0
+  if (hasSocket !== hasHost || hasSocket !== hasSourceHost || hasSocket !== hasSourceSession || hasSocket !== hasToken) throw new Error('runtime Manager socket, Host/source identity and capability token must be configured together')
+  if (hasSocket && (!path.isAbsolute(config.runtimeManagerSocket) || !path.isAbsolute(config.runtimeManagerCapabilityTokenFile))) throw new Error('Runtime Manager socket and capability token paths must be absolute')
+  const runtimeManager = ctx.get?.('dshRemoteRuntimeManager') ?? ctx.runtimeManager ?? (hasSocket
+    ? new UnixSocketRuntimeManager({
+      socketPath: config.runtimeManagerSocket,
+      hostId: config.runtimeManagerHostId,
+      sourceHostId: config.runtimeManagerSourceHostId,
+      sourceSessionId: config.runtimeManagerSourceSessionId,
+      capabilityTokenFile: config.runtimeManagerCapabilityTokenFile,
+      timeoutMs: config.runtimeManagerTimeoutMs,
+    })
+    : undefined)
   return {
     subprocess: {
       spawn: (spec) => ctx.subprocess.spawn(spec),
@@ -79,8 +113,7 @@ export function runtimeEnvFor(ctx, config = {}) {
     path,
     logger: ctx.logger,
     cwd: config.cwd,
-    runtimeManager: config.runtimeManager ?? ctx.runtimeManager,
-    executionPolicy: config.executionPolicy,
+    runtimeManager,
   }
 }
 
@@ -155,6 +188,7 @@ class ChannelUpdateQueue {
  */
 export function bindChannelEnv(channel, env) {
   const bound = { ...channel }
+  const trustedLaunchOptions = (opts = {}) => ({ ...opts, ...(opts.executionPolicy ? { [TRUSTED_EXECUTION_POLICY]: opts.executionPolicy } : {}) })
   if (typeof channel.listSessions === 'function') {
     bound.listSessions = (opts) => channel.listSessions(opts, env)
   }
@@ -162,10 +196,10 @@ export function bindChannelEnv(channel, env) {
     bound.readSession = (opts) => channel.readSession(opts, env)
   }
   if (typeof channel.startManagedSession === 'function') {
-    bound.startManagedSession = (opts) => channel.startManagedSession(opts, env)
+    bound.startManagedSession = (opts) => channel.startManagedSession(trustedLaunchOptions(opts), env)
   }
   if (typeof channel.steerActive === 'function') {
-    bound.steerActive = (opts) => channel.steerActive(opts, env)
+    bound.steerActive = (opts) => channel.steerActive(trustedLaunchOptions(opts), env)
   }
   if (typeof channel.cancel === 'function') {
     bound.cancel = (opts) => channel.cancel(opts, env)
@@ -194,12 +228,14 @@ export function providerFromChannel(channel, env, providerName) {
         cwd: request.cwd,
         parentCwd: parentCwdOf(request),
         background: request.background === true,
-        executionPolicy: request.executionPolicy,
       }
       const signal = request.signal
       const updates = new ChannelUpdateQueue()
       const envWithSignal = {
         ...env,
+        // The policy is authoritative only in the per-run environment. The
+        // channel request is deliberately not allowed to override it.
+        executionPolicy: request[TRUSTED_EXECUTION_POLICY] ?? env.executionPolicy,
         signal,
         onUpdate(update) {
           try { env.onUpdate?.(update) } catch {}
@@ -365,7 +401,18 @@ export function mountChannel(ctx, config = {}) {
  */
 export function apply(ctx, config = {}) {
   registry.setLogger(ctx.logger)
-  const channels = Array.isArray(config.channels) ? config.channels : config.channel ? [config] : []
+  const runtimeConfig = {
+    runtimeManagerSocket: config.runtimeManagerSocket,
+    runtimeManagerHostId: config.runtimeManagerHostId,
+    runtimeManagerSourceHostId: config.runtimeManagerSourceHostId,
+    runtimeManagerSourceSessionId: config.runtimeManagerSourceSessionId,
+    runtimeManagerCapabilityTokenFile: config.runtimeManagerCapabilityTokenFile,
+    runtimeManagerTimeoutMs: config.runtimeManagerTimeoutMs,
+    appServerRequestTimeoutMs: config.appServerRequestTimeoutMs,
+    appServerTurnTimeoutMs: config.appServerTurnTimeoutMs,
+  }
+  const channels = (Array.isArray(config.channels) ? config.channels : config.channel ? [config] : [])
+    .map((row) => ({ ...runtimeConfig, ...row }))
   const mounted = []
   for (const row of channels) {
     const result = mountChannel(ctx, row)

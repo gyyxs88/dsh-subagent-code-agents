@@ -3,6 +3,7 @@ import test from 'node:test'
 
 import {
   normalizeExecutionPolicy,
+  executionPolicyFor,
   supportsExecutionPolicy,
   unsupportedPermissionPolicy,
 } from '../lib/index.js'
@@ -18,6 +19,7 @@ test('execution policy binds owner and approval mode to the three DSH permission
     permission: 'read-only',
     approvalOwner: 'target-session',
     approvalMode: 'target-session',
+    provenance: { authority: 'unverified-local', verified: false },
   })
   assert.equal(normalizeExecutionPolicy({
     ...base,
@@ -28,6 +30,7 @@ test('execution policy binds owner and approval mode to the three DSH permission
     ...base,
     permission: 'danger-full-access',
   }).approvalOwner, 'full-access-controller')
+  assert.equal(normalizeExecutionPolicy({ ...base, permission: 'danger-full-access' }).approvalMode, 'controller-verified')
 })
 
 test('execution policy rejects missing policy, owner escalation and traversal', () => {
@@ -44,4 +47,13 @@ test('unsupported channel policy is an explicit structured refusal', () => {
   assert.equal(result.stopReason, 'unsupported')
   assert.equal(result.errorCode, 'unsupported-permission-policy')
   assert.match(result.output, /workspace-write/)
+})
+
+test('channel launch cannot self-authorize from request policy or an unverified env label', () => {
+  const forged = { ...base, permission: 'danger-full-access', approvalOwner: 'full-access-controller', approvalMode: 'controller-verified', provenance: { authority: 'dsh-session-control', verified: true } }
+  assert.throws(() => executionPolicyFor({ executionPolicy: forged }, {}, 'C:/workspace'), /target DSH Session|source required/)
+  assert.throws(() => executionPolicyFor({}, { executionPolicy: { ...forged, provenance: { authority: 'unverified-local', verified: false } } }, 'C:/workspace'), /resolved by the target DSH Session/)
+  const trusted = executionPolicyFor({}, { executionPolicy: forged }, 'C:/workspace')
+  assert.equal(trusted.provenance.verified, true)
+  assert.throws(() => executionPolicyFor({ executionPolicy: { ...forged, permission: 'read-only', approvalOwner: 'target-session', approvalMode: 'target-session' } }, { executionPolicy: forged }, 'C:/workspace'), /cannot override/)
 })

@@ -22,8 +22,11 @@ export const CODEX_FIXED_SANDBOX_ARGV = Object.freeze(['--dangerously-bypass-app
 export function codexExecutionPolicyArgv(policy) {
   if (!policy || typeof policy.permission !== 'string') throw new Error(`${PREFIX}: execution policy is required`)
   if (policy.permission === 'danger-full-access') return [...CODEX_FIXED_SANDBOX_ARGV]
-  if (policy.permission === 'read-only') return ['--sandbox', 'read-only', '--ask-for-approval', 'on-request']
-  if (policy.permission === 'workspace-write') return ['--sandbox', 'workspace-write', '--ask-for-approval', 'on-request']
+  // `codex exec` 0.147.0 exposes `--sandbox` but not the old
+  // `--ask-for-approval` flag. Approval is the documented config key and is
+  // passed through the supported `-c key=value` override instead.
+  if (policy.permission === 'read-only') return ['--sandbox', 'read-only', '-c', 'approval_policy="on-request"']
+  if (policy.permission === 'workspace-write') return ['--sandbox', 'workspace-write', '-c', 'approval_policy="on-request"']
   throw new Error(`${PREFIX}: unsupported permission policy ${policy.permission}`)
 }
 
@@ -101,7 +104,9 @@ export async function runCodexExec({ env, request, resumeSessionId, capabilities
   const policy = executionPolicyFor(request, env, cwd)
   const capabilities = capabilitiesOverride ?? codexChannel().capabilities
   if (!supportsExecutionPolicy({ capabilities }, policy)) return unsupportedPermissionPolicy(CHANNEL_ID, policy, capabilities)
-  if (policy.permission === 'workspace-write' && typeof policy.approvalHandler !== 'function') return unsupportedPermissionPolicy(CHANNEL_ID, policy, capabilities, 'Codex CLI has no target-session approval bridge for Workspace Write')
+  // `codex exec` has no server-request bridge for target-session approvals.
+  // Workspace Write is therefore owned by the full app-server channel only.
+  if (policy.permission === 'workspace-write') return unsupportedPermissionPolicy(CHANNEL_ID, policy, capabilities, 'Codex CLI cannot route Workspace Write approvals; use the app-server channel')
   const { argvPrefix } = await resolveCodexEntry(env, request)
   const argv =
     resumeSessionId === undefined
@@ -255,7 +260,8 @@ export async function resolveCodexEntry(env, request = {}) {
   }
 
   if (env.runtimeManager?.resolveExecutable) {
-    const resolved = await env.runtimeManager.resolveExecutable(request.runtimeRequirement ?? env.runtimeRequirement)
+    const runtimeRequirement = request.runtimeRequirement ?? env.runtimeRequirement
+    const resolved = await env.runtimeManager.resolveExecutable(runtimeRequirement, { sourceSessionId: env.executionPolicy?.sourceSessionId, targetSessionId: env.executionPolicy?.targetSessionId })
     if (typeof resolved?.executable !== 'string' || resolved.executable.length === 0) throw new Error(`${PREFIX}: Runtime Manager returned no absolute Codex executable`)
     return { argvPrefix: [resolved.executable], executable: resolved.executable, runtimeState: resolved.state }
   }
@@ -293,7 +299,7 @@ export function createCodexChannel(options = {}) {
       modelOverride: true,
       effortOverride: true,
       sandboxBypassGuaranteed: true,
-      executionPolicies: { 'read-only': true, 'workspace-write': true, 'danger-full-access': true },
+      executionPolicies: { 'read-only': true, 'workspace-write': false, 'danger-full-access': true },
     },
     async run(request, env) {
       return runCodexExec({

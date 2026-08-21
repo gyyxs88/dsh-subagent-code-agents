@@ -6,6 +6,7 @@ import type { ChannelRegistry, CodingAgentChannel } from '@dsh-subagent-code-age
 
 export const name: string
 export const inject: string[]
+export const Config: unknown
 
 export const CHANNEL_FACTORIES: Readonly<Record<string, (cfg: Record<string, unknown>) => CodingAgentChannel>>
 

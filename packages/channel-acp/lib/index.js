@@ -116,7 +116,8 @@ async function resolveCommand(env, command, commandEnv, runtimeRequirement) {
     return env.path.isAbsolute(command) ? command : env.path.resolve(command)
   }
   if (env.runtimeManager?.resolveExecutable) {
-    const resolved = await env.runtimeManager.resolveExecutable(runtimeRequirement ?? env.runtimeRequirement ?? { id: `acp/${command}`, version: env.runtimeVersion, executablePath: command })
+    const requirement = runtimeRequirement ?? env.runtimeRequirement ?? { id: `acp/${command}`, version: env.runtimeVersion, executablePath: command }
+    const resolved = await env.runtimeManager.resolveExecutable(requirement, { sourceSessionId: env.executionPolicy?.sourceSessionId, targetSessionId: env.executionPolicy?.targetSessionId })
     if (typeof resolved?.executable === 'string' && env.path.isAbsolute(resolved.executable)) return resolved.executable
   }
   throw new Error(`${PREFIX}: runtime manager must provide an absolute ACP executable; PATH resolution is disabled`)
