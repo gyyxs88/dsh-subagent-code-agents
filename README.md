@@ -2,6 +2,10 @@
 
 DeepSeek Harness（DSH）的多渠道编码代理子代理插件：内置 OpenAI Codex、Anthropic Claude Code、Grok Build，并可配置任意数量的 Agent Client Protocol（ACP）实例。它同时提供严格角色、插件自有后台运行登记和诚实的重启后续跑语义；旧 `dsh-subagent-codex` 可原样共存。
 
+## 远程项目与运行时部署
+
+本插件是渠道适配器，不负责把 Codex、Claude Code、Grok Build 安装或认证到远端主机。DSH 远程项目采用按项目 Desired State 安装外部 Agent 运行时、默认由本机 Model Gateway 服务 DSH 原生 Agent、第三方登录态留在远端的方案；完整的组件边界、权限继承、安装流程和验收标准见 [`dsh-session-control` 的远程项目架构文档](https://github.com/gyyxs88/dsh-session-control/blob/main/docs/remote-project-architecture.md)。在渠道执行权限策略完成前，固定 bypass 的三个外部渠道不得用于远端 Read Only 或 Workspace Write 项目。
+
 ```
 packages/
   core/                    渠道适配器接口 + 注册表 + 统一结果 + Runtime 注入（无 DSH 依赖）
