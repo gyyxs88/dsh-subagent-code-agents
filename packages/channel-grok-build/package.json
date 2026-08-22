@@ -1,8 +1,8 @@
 {
   "name": "@dsh-subagent-code-agents/channel-grok-build",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Grok Build channel adapter: runs the Grok Build CLI headless behind the multi-channel coding-agent core (no DSH/Cordis dependency)",
-  "dsh": { "remote": { "channelRuntime": { "schemaVersion": "1.0", "runtimeId": "grok-build", "placement": "remote", "protocolVersion": "1.0", "driver": "grok-build", "authPolicy": "driver-defined", "capabilities": ["headless", "acp", "permission-mode", "sandbox-profile"], "compatibility": { "dsh": { "min": "0.1.0-rc.6", "max": "0.1.0-rc.6" }, "api": { "min": "1.0", "max": "1.0" } } } } },
+  "dsh": { "remote": { "channelRuntime": { "schemaVersion": "1.0", "runtimeId": "grok-build", "placement": "remote", "protocolVersion": "1.0", "driver": "grok-build", "authPolicy": "driver-defined", "capabilities": ["headless", "acp", "permission-mode", "sandbox-profile"], "compatibility": { "dsh": { "min": "0.1.0-rc.6", "max": "0.1.0-rc.8" }, "api": { "min": "1.0", "max": "1.0" } } } } },
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
@@ -22,8 +22,8 @@
     "test": "node --test --test-isolation=none"
   },
   "dependencies": {
-    "@dsh-subagent-code-agents/channel-acp": "0.1.0",
-    "@dsh-subagent-code-agents/core": "0.1.0"
+    "@dsh-subagent-code-agents/channel-acp": "0.1.1",
+    "@dsh-subagent-code-agents/core": "0.1.1"
   },
   "license": "MIT",
   "keywords": [
