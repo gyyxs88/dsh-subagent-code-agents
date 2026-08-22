@@ -1,6 +1,6 @@
 {
   "name": "@dsh-subagent-code-agents/core",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Multi-channel coding-agent subagent core: channel adapter interface, registry, unified results, runtime injection",
   "type": "module",
   "main": "lib/index.js",
