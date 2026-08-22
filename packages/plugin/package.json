@@ -1,6 +1,6 @@
 {
   "name": "@dsh-subagent-code-agents/plugin",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Multi-channel coding-agent subagent plugin internals (Codex / Claude Code / Grok Build / ACP)",
   "type": "module",
   "main": "lib/index.js",
@@ -44,11 +44,11 @@
     "test": "node --test --test-isolation=none"
   },
   "dependencies": {
-    "@dsh-subagent-code-agents/core": "0.1.1",
-    "@dsh-subagent-code-agents/channel-codex": "0.1.1",
-    "@dsh-subagent-code-agents/channel-claude-code": "0.1.1",
-    "@dsh-subagent-code-agents/channel-grok-build": "0.1.1",
-    "@dsh-subagent-code-agents/channel-acp": "0.1.1",
+    "@dsh-subagent-code-agents/core": "0.1.2",
+    "@dsh-subagent-code-agents/channel-codex": "0.1.2",
+    "@dsh-subagent-code-agents/channel-claude-code": "0.1.2",
+    "@dsh-subagent-code-agents/channel-grok-build": "0.1.2",
+    "@dsh-subagent-code-agents/channel-acp": "0.1.2",
     "@deepseek-ai/schemastery": "^3.18.1"
   },
   "peerDependencies": {

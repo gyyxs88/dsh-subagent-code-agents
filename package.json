@@ -1,6 +1,6 @@
 {
   "name": "dsh-subagent-code-agents",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Multi-channel coding-agent subagent plugin for DeepSeek Harness: Codex, Claude Code, Grok Build and configurable ACP agents",
   "type": "module",
   "main": "packages/plugin/lib/index.js",
@@ -54,12 +54,12 @@
     "LICENSE"
   ],
   "dependencies": {
-    "@dsh-subagent-code-agents/core": "0.1.1",
-    "@dsh-subagent-code-agents/channel-codex": "0.1.1",
-    "@dsh-subagent-code-agents/channel-claude-code": "0.1.1",
-    "@dsh-subagent-code-agents/channel-grok-build": "0.1.1",
-    "@dsh-subagent-code-agents/channel-acp": "0.1.1",
-    "@dsh-subagent-code-agents/plugin": "0.1.1",
+    "@dsh-subagent-code-agents/core": "0.1.2",
+    "@dsh-subagent-code-agents/channel-codex": "0.1.2",
+    "@dsh-subagent-code-agents/channel-claude-code": "0.1.2",
+    "@dsh-subagent-code-agents/channel-grok-build": "0.1.2",
+    "@dsh-subagent-code-agents/channel-acp": "0.1.2",
+    "@dsh-subagent-code-agents/plugin": "0.1.2",
     "@deepseek-ai/schemastery": "^3.18.1"
   },
   "bundleDependencies": [
@@ -76,8 +76,8 @@
     "@deepseek-ai/dsh-tools": ">=0.1.0-rc.6"
   },
   "devDependencies": {
-    "@deepseek-ai/dsh-subagent": "0.1.0-rc.8",
-    "@deepseek-ai/dsh-tools": "0.1.0-rc.8"
+    "@deepseek-ai/dsh-subagent": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-tools": "0.1.1-rc.2"
   },
   "license": "MIT",
   "keywords": [
