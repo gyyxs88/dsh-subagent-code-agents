@@ -34,6 +34,25 @@ export const inject = ['subagents', 'subprocess']
 export const Config = z.object({
   channels: z.array(z.dict(z.any())).default([]),
   channel: z.string().default(''),
+  providerName: z.string(),
+  codexExecutable: z.string(),
+  nodeExecutable: z.string(),
+  codexJs: z.string(),
+  claudeExecutable: z.string(),
+  grokExecutable: z.string(),
+  grokHome: z.string(),
+  id: z.string(),
+  name: z.string(),
+  displayName: z.string(),
+  command: z.string(),
+  args: z.array(z.string()).default(undefined),
+  env: z.dict(z.string()).default(undefined),
+  cwd: z.string(),
+  runtimeRequirement: z.dict(z.any()).default(undefined),
+  executionPolicies: z.dict(z.boolean()).default(undefined),
+  requestTimeoutMs: z.number().step(1).min(100),
+  managedInitTimeoutMs: z.number().step(1).min(100),
+  managedRequestTimeoutMs: z.number().step(1).min(100),
   runtimeManagerSocket: z.string().default(''),
   runtimeManagerHostId: z.string().default(''),
   runtimeManagerSourceHostId: z.string().default(''),
@@ -94,7 +113,11 @@ export function runtimeEnvFor(ctx, config = {}) {
   const hasToken = typeof config.runtimeManagerCapabilityTokenFile === 'string' && config.runtimeManagerCapabilityTokenFile.length > 0
   if (hasSocket !== hasHost || hasSocket !== hasSourceHost || hasSocket !== hasSourceSession || hasSocket !== hasToken) throw new Error('runtime Manager socket, Host/source identity and capability token must be configured together')
   if (hasSocket && (!path.isAbsolute(config.runtimeManagerSocket) || !path.isAbsolute(config.runtimeManagerCapabilityTokenFile))) throw new Error('Runtime Manager socket and capability token paths must be absolute')
-  const runtimeManager = ctx.get?.('dshRemoteRuntimeManager') ?? ctx.runtimeManager ?? (hasSocket
+  // Cordis contexts reject undeclared property access. The formal host
+  // service is queried through ctx.get(); local socket configuration is the
+  // only fallback. Reading ctx.runtimeManager here made every ordinary local
+  // channel fail to mount before it reached the registry.
+  const runtimeManager = ctx.get?.('dshRemoteRuntimeManager') ?? (hasSocket
     ? new UnixSocketRuntimeManager({
       socketPath: config.runtimeManagerSocket,
       hostId: config.runtimeManagerHostId,
@@ -390,7 +413,8 @@ export function mountChannel(ctx, config = {}) {
     ctx.logger.info?.(`dsh-subagent-code-agents: registered provider ${providerName}`)
     return { provider, channel, unregister }
   } catch (error) {
-    ctx.logger.error?.(`dsh-subagent-code-agents: channel ${channelType} failed to mount: ${String(error?.message ?? error)}`)
+    const failure = registry.recordError(channelType, error)
+    ctx.logger.error?.(`dsh-subagent-code-agents: channel ${channelType} failed to mount: ${failure.message}`)
     return undefined
   }
 }
@@ -399,7 +423,7 @@ export function mountChannel(ctx, config = {}) {
  * Cordis plugin apply(): mounts every configured channel row and exposes the
  * registry for the tool layer.
  */
-export function apply(ctx, config = {}) {
+export const apply = (ctx, config = {}) => {
   registry.setLogger(ctx.logger)
   const runtimeConfig = {
     runtimeManagerSocket: config.runtimeManagerSocket,
@@ -411,12 +435,26 @@ export function apply(ctx, config = {}) {
     appServerRequestTimeoutMs: config.appServerRequestTimeoutMs,
     appServerTurnTimeoutMs: config.appServerTurnTimeoutMs,
   }
-  const channels = (Array.isArray(config.channels) ? config.channels : config.channel ? [config] : [])
+  // Config validation supplies the default `channels: []` even for the
+  // bundle's one-row `channel: codex` form. An empty multi-row list must not
+  // shadow that single-row channel, otherwise every default provider loads
+  // successfully while mounting nothing.
+  const channels = (Array.isArray(config.channels) && config.channels.length > 0
+    ? config.channels
+    : config.channel ? [config] : [])
     .map((row) => ({ ...runtimeConfig, ...row }))
   const mounted = []
   for (const row of channels) {
     const result = mountChannel(ctx, row)
     if (result !== undefined) mounted.push(result)
   }
-  return { registry, mounted }
+  // Cordis treats a plugin's return value as its lifecycle effect. Returning
+  // an ordinary metadata object is invalid on DSH rc.2 and causes every
+  // successfully mounted channel to be rolled back with `Invalid effect`.
+  // Keep the direct-call inspection fields used by tests while returning a
+  // real, awaitable cleanup function to the host.
+  const cleanup = async () => {
+    for (const item of [...mounted].reverse()) await item.unregister()
+  }
+  return Object.assign(cleanup, { registry, mounted })
 }

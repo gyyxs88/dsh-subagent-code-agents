@@ -98,7 +98,9 @@ function channelFor(args, logger) {
   const channel = registry.get(args.channel)
   if (channel === undefined) {
     const known = registry.list().map((c) => c.id).join(', ')
-    throw new Error(`unknown channel "${args.channel}" — registered: ${known || '(none)'}`)
+    const failure = registry.errors().get(args.channel)
+    const detail = failure === undefined ? '' : `; mount failed: ${failure.message.slice(0, 500)}`
+    throw new Error(`unknown channel "${args.channel}" — registered: ${known || '(none)'}${detail}`)
   }
   return channel
 }
@@ -157,7 +159,7 @@ function clampInt(value, min, max, fallback) {
   return Math.min(max, Math.max(min, Math.round(n)))
 }
 
-export function apply(ctx, config = {}, injected = {}) {
+export const apply = (ctx, config = {}, injected = {}) => {
   // Explicit Cordis mounts resolve this through the plugin's own injected
   // context. The host auto-mount policy passes its already-injected service
   // because an agent scope may intentionally isolate `subagents`.

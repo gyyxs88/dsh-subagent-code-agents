@@ -258,6 +258,13 @@ export class ChannelRegistry {
     this._logger?.error?.(`channel ${id} registration failed: ${error.message}`)
   }
 
+  /** Record a channel construction/mount failure for diagnostics. */
+  recordError(id, error) {
+    const normalized = error instanceof Error ? error : new Error(String(error))
+    this._recordError(id, normalized)
+    return normalized
+  }
+
   setLogger(logger) {
     this._logger = logger ?? { info() {}, warn() {}, error() {} }
     return this

@@ -29,7 +29,7 @@ function visiblePluginTools(ctx, agent) {
   return toolNames.filter((toolName) => ctx.tools.get(toolName, agent) !== undefined)
 }
 
-export function apply(ctx, config = {}) {
+export const apply = (ctx, config = {}) => {
   const excludedPresets = Array.isArray(config.excludedPresets)
     ? config.excludedPresets
     : ['minimal']

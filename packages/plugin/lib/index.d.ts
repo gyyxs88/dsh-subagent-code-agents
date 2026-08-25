@@ -20,4 +20,10 @@ export function mountChannel(
   ctx: Record<string, any>,
   config?: Record<string, unknown>,
 ): { provider: unknown; channel: CodingAgentChannel; unregister: () => Promise<void> } | undefined
-export function apply(ctx: Record<string, any>, config?: Record<string, unknown>): { registry: ChannelRegistry; mounted: unknown[] }
+export interface MountedChannelsCleanup {
+  (): Promise<void>
+  registry: ChannelRegistry
+  mounted: unknown[]
+}
+
+export function apply(ctx: Record<string, any>, config?: Record<string, unknown>): MountedChannelsCleanup

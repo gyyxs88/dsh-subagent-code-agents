@@ -1,10 +1,13 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
+import { Context } from '@deepseek-ai/cordis'
 import { registry } from '@dsh-subagent-code-agents/core'
 import {
+  Config,
   apply as applyPlugin,
   bindChannelEnv,
+  inject,
   mountChannel,
   providerFromChannel,
   providerNameFor,
@@ -160,6 +163,69 @@ test('apply mounts multiple channels from config.channels', () => {
   assert.ok(names.includes('coding-agent/claude-code'))
   assert.ok(names.includes('coding-agent/grok-build'))
   for (const id of ['codex', 'claude-code', 'grok-build']) registry.unregister(id)
+})
+
+test('real Cordis lifecycle keeps a configured channel mounted until fiber disposal', async () => {
+  const ctx = new Context()
+  const providers = []
+  const serviceDisposers = [
+    ctx.provide('subagents', {
+      registerProvider(provider) {
+        providers.push(provider)
+        return () => {
+          const index = providers.indexOf(provider)
+          if (index >= 0) providers.splice(index, 1)
+        }
+      },
+    }),
+    ctx.provide('subprocess', {
+      spawn() { throw new Error('subprocess.spawn not expected') },
+      async resolveExecutable() { throw new Error('resolveExecutable not expected') },
+    }),
+  ]
+  const cordisPlugin = { Config, inject, apply: applyPlugin }
+  let fiber
+  try {
+    fiber = ctx.plugin(cordisPlugin, {
+      channel: 'codex',
+      providerName: 'coding-agent/codex',
+      nodeExecutable: 'C:/runtime/node.exe',
+      codexJs: 'C:/runtime/codex.js',
+    })
+    await fiber
+    assert.equal(fiber.state, 2, 'Cordis fiber must remain active')
+    assert.equal(registry.errors().get('codex'), undefined)
+    assert.equal(providers.length, 1)
+    assert.equal(providers[0].name, 'coding-agent/codex')
+    assert.ok(registry.has('codex'))
+
+    await fiber.dispose()
+    fiber = undefined
+    assert.equal(providers.length, 0)
+    assert.equal(registry.has('codex'), false)
+  } finally {
+    await fiber?.dispose()
+    registry.unregister('codex')
+    await Promise.allSettled(serviceDisposers.reverse().map((dispose) => dispose()))
+  }
+})
+
+test('public Config validates documented local and ACP launch fields', async () => {
+  const result = await Config['~standard'].validate({
+    channel: 'codex',
+    providerName: 'coding-agent/codex',
+    nodeExecutable: 'C:/runtime/node.exe',
+    codexJs: 'C:/runtime/codex.js',
+    command: 'C:/runtime/acp.exe',
+    args: ['acp'],
+    env: { MODE: 'test' },
+    executionPolicies: { 'read-only': true },
+  })
+  assert.equal(result.issues, undefined)
+  assert.equal(result.value.nodeExecutable, 'C:/runtime/node.exe')
+  assert.equal(result.value.codexJs, 'C:/runtime/codex.js')
+  assert.deepEqual(result.value.args, ['acp'])
+  assert.deepEqual(result.value.executionPolicies, { 'read-only': true })
 })
 
 test('apply does not assign undeclared properties onto a strict Cordis context', async () => {

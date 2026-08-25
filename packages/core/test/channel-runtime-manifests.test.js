@@ -10,7 +10,7 @@ const channels = ['channel-codex', 'channel-claude-code', 'channel-grok-build', 
 test('channel runtime manifests are versioned and cover the validated DSH 0.1.1-rc.2 ceiling', async () => {
   for (const channel of channels) {
     const manifest = JSON.parse(await readFile(path.join(root, 'packages', channel, 'package.json'), 'utf8'))
-    assert.equal(manifest.version, '0.1.2')
+    assert.equal(manifest.version, '0.1.3')
     assert.deepEqual(manifest.dsh.remote.channelRuntime.compatibility.dsh, {
       min: '0.1.0-rc.6',
       max: '0.1.1-rc.2',
