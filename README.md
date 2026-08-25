@@ -142,7 +142,7 @@ npm pack
 // <profile>/package.json
 {
   "dependencies": {
-    "dsh-subagent-code-agents": "file:D:/path/to/dsh-subagent-code-agents-0.1.2.tgz"
+    "dsh-subagent-code-agents": "file:D:/path/to/dsh-subagent-code-agents-0.1.3.tgz"
   },
   "dsh": {
     "profile": {
@@ -171,6 +171,8 @@ npm pack
   config: { channel: grok-build, providerName: coding-agent/grok-build }
 ```
 
+渠道“出现在工具参数里”不等于渠道已注册。插件会在真实 Cordis 生命周期中逐行挂载 provider，并把构造失败保存在渠道注册表；工具遇到未注册渠道时会同时返回该渠道的有界 mount failure，而不是只显示含糊的 `registered: (none)`。发布验收必须至少覆盖一次经过 Config 校验的真实 Cordis fiber，不能只直接调用 `apply()`。
+
 每行可配置 `runtimeRequirement`、`runtimeManagerSocket`、`runtimeManagerHostId`、`runtimeManagerSourceHostId`、`runtimeManagerSourceSessionId`、`runtimeManagerCapabilityTokenFile`、`runtimeManagerTimeoutMs` 和 `appServerTurnTimeoutMs`，以及受信的 Session Control policy service；这些是公开配置字段，不传函数或任意 manager 对象。Runtime Manager 的 socket、Host/source 身份和 0600 capability token 必须成组配置；channel 另从目标 Session policy 获取真实 `targetSessionId`，不能把来源身份冒充 target。正式远程部署优先只传 Runtime Manager 返回的绝对 executable。`codexExecutable`、`claudeExecutable`、`grokExecutable` 仅作为受控的绝对路径注入/测试边界，不触发 PATH 搜索，不能是 `.cmd/.ps1/.bat` shim；`codexExecutable` 与 `codexJs` 不可同时设置。Claude Agent SDK 继续使用远端用户已经完成的官方认证；Grok 的 `grokHome` 只用于远端 session metadata 读取，不得用来把登录目录复制到本机。
 
 macOS 上若 DSH 的 PATH 没有包含渠道 CLI，可显式填写绝对路径，例如：
@@ -185,6 +187,29 @@ macOS 上若 DSH 的 PATH 没有包含渠道 CLI，可显式填写绝对路径�
 ```
 
 此配置只指定受控启动文件，不代替 runtime 安装或登录；阶段 C 远程目标是 Linux x86_64，登录状态留在远端用户边界。
+
+Windows 的 npm shim 通常是 `.cmd` / `.ps1`，不能交给无 shell 启动器。应把 Codex 配成绝对 Node + `codex.js`，并为带原生可执行文件的渠道配置真实 `.exe`：
+
+```yaml
+- id: coding-agent-codex
+  config:
+    channel: codex
+    providerName: coding-agent/codex
+    nodeExecutable: 'D:\\path\\to\\node.exe'
+    codexJs: 'C:\\Users\\<user>\\AppData\\Roaming\\npm\\node_modules\\@openai\\codex\\bin\\codex.js'
+- id: coding-agent-claude-code
+  config:
+    channel: claude-code
+    providerName: coding-agent/claude-code
+    claudeExecutable: 'C:\\Users\\<user>\\AppData\\Roaming\\npm\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe'
+- id: coding-agent-grok-build
+  config:
+    channel: grok-build
+    providerName: coding-agent/grok-build
+    grokExecutable: 'C:\\Users\\<user>\\.grok\\bin\\grok.exe'
+```
+
+这些路径只解决本机进程启动，不复制登录态，也不读取凭据。未配置绝对入口且没有正式 Runtime Manager 时，渠道会保持注册，但首次运行会 fail closed。
 
 ACP 实例按需追加；`id`/`name` 只写实例名，注册后是 `acp/<name>`。命令用无 shell 的 argv 启动，不接受 `.cmd/.ps1/.bat` shim：
 

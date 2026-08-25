@@ -157,6 +157,7 @@ export class ChannelRegistry {
   constructor()
   register(channel: CodingAgentChannel): CodingAgentChannel | undefined
   replace(channel: CodingAgentChannel): CodingAgentChannel | undefined
+  recordError(id: string, error: unknown): Error
   setLogger(logger: { info: Function; warn: Function; error: Function }): this
   get(id: string): CodingAgentChannel | undefined
   has(id: string): boolean
