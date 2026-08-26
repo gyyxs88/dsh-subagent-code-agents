@@ -762,6 +762,13 @@ test('background owned run settles, remains inspectable, and resumes as a linked
     async resume() {},
   })
   applyTool(ctx, {})
+  const ownerInbox = []
+  const owner = {
+    id: 'owner',
+    session: { id: 'owner', events: [] },
+    inbox: { nextTurn: ownerInbox, nextStep: [] },
+    followup(message) { ownerInbox.push(message) },
+  }
   const started = await state.registeredTools.get('subagent_code').execute(
     {
       channel: 'owned-channel',
@@ -769,7 +776,7 @@ test('background owned run settles, remains inspectable, and resumes as a linked
       prompt: 'secret prompt not persisted',
       run_in_background: true,
     },
-    { agent: { id: 'owner' }, signal: new AbortController().signal },
+    { agent: owner, signal: new AbortController().signal },
   )
   assert.equal(started.kind, 'background')
   assert.equal(started.jobId, 'job-1')
@@ -778,26 +785,38 @@ test('background owned run settles, remains inspectable, and resumes as a linked
   assert.match(renderedStart, /job-1/)
   assert.match(renderedStart, new RegExp(started.runId))
   assert.deepEqual(await tasks[0].done, { status: 'completed', output: 'done-1' })
+  assert.equal(ownerInbox.length, 1)
+  assert.equal(ownerInbox[0].source.form, 'run-terminal-report')
 
   const read = await state.registeredTools.get('coding_run_read').execute(
     { run_id: started.runId },
-    { agent: { id: 'owner' } },
+    { agent: owner },
   )
   assert.equal(read.status, 'settled')
   assert.equal(read.continuation, 'resume_available')
   assert.equal(read.sessionId, 'session-owned')
   assert.ok(!Object.hasOwn(read, 'prompt'))
+  await assert.rejects(() => state.registeredTools.get('coding_run_read').execute(
+    { run_id: started.runId },
+    { agent: { id: 'other-owner' } },
+  ), /unknown owned run/u)
+  const hidden = await state.registeredTools.get('coding_runs_list').execute(
+    {},
+    { agent: { id: 'other-owner' } },
+  )
+  assert.equal(hidden.runs.length, 0)
 
   const resumed = await state.registeredTools.get('coding_run_resume').execute(
     { run_id: started.runId, prompt: 'continue now' },
-    { agent: { id: 'owner' } },
+    { agent: owner },
   )
   assert.equal(resumed.jobId, 'job-2')
   assert.equal(starts[1].request.resumeSessionId, 'session-owned')
   assert.deepEqual(await tasks[1].done, { status: 'completed', output: 'done-2' })
+  assert.equal(ownerInbox.length, 2)
   const resumedRead = await state.registeredTools.get('coding_run_read').execute(
     { run_id: resumed.runId },
-    { agent: { id: 'owner' } },
+    { agent: owner },
   )
   assert.equal(resumedRead.resumedFrom, started.runId)
   registry.unregister('owned-channel')

@@ -16,6 +16,7 @@ const VERSION = 1
 const MAX_RUNS = 1000
 const MAX_SUMMARY = 1000
 const VALID_STATUS = new Set(['running', 'settled', 'interrupted'])
+const VALID_NOTIFICATION_STATE = new Set(['reserved', 'delivering', 'retryable', 'delivery-unknown', 'delivered'])
 const SHARED_FILE_REGISTRIES = new Map()
 
 function cleanString(value, max) {
@@ -31,17 +32,38 @@ function outputText(output) {
     .join('')
 }
 
+function safeNotification(raw) {
+  if (!raw || typeof raw !== 'object') return undefined
+  const messageId = cleanString(raw.messageId, 100)
+  const fingerprint = cleanString(raw.fingerprint, 64)
+  if (!messageId || !/^[a-f0-9]{64}$/u.test(fingerprint ?? '') || !VALID_NOTIFICATION_STATE.has(raw.state)) return undefined
+  return {
+    kind: raw.kind === 'interrupted' ? 'interrupted' : 'terminal',
+    fingerprint,
+    messageId,
+    state: raw.state,
+    attempts: Number.isSafeInteger(raw.attempts) && raw.attempts >= 0 ? raw.attempts : 0,
+    reservedAt: cleanString(raw.reservedAt, 64),
+    lastAttemptAt: cleanString(raw.lastAttemptAt, 64),
+    deliveredAt: cleanString(raw.deliveredAt, 64),
+    lastError: cleanString(raw.lastError, 500),
+  }
+}
+
 function safeRecord(raw) {
   if (!raw || typeof raw !== 'object') return undefined
   const id = cleanString(raw.id, 100)
   const channel = cleanString(raw.channel, 100)
   const createdAt = cleanString(raw.createdAt, 64)
+  const notification = safeNotification(raw.notification)
   if (!id || !channel || !createdAt || !VALID_STATUS.has(raw.status)) return undefined
   return {
     id,
     channel,
     label: cleanString(raw.label, 200) ?? 'coding-agent run',
     status: raw.status,
+    ...(cleanString(raw.ownerId, 200) ? { ownerId: cleanString(raw.ownerId, 200) } : {}),
+    completionDelivery: raw.completionDelivery === 'followup' ? 'followup' : 'manual',
     ...(cleanString(raw.role, 64) ? { role: cleanString(raw.role, 64) } : {}),
     ...(cleanString(raw.cwd, 4096) ? { cwd: cleanString(raw.cwd, 4096) } : {}),
     ...(cleanString(raw.model, 200) ? { model: cleanString(raw.model, 200) } : {}),
@@ -55,6 +77,7 @@ function safeRecord(raw) {
       : {}),
     ...(cleanString(raw.jobId, 200) ? { jobId: cleanString(raw.jobId, 200) } : {}),
     ...(cleanString(raw.resumedFrom, 100) ? { resumedFrom: cleanString(raw.resumedFrom, 100) } : {}),
+    ...(notification ? { notification } : {}),
     createdAt,
     updatedAt: cleanString(raw.updatedAt, 64) ?? createdAt,
   }
@@ -140,6 +163,8 @@ export class OwnedRunRegistry {
       id: this.idFactory(),
       channel: input.channel,
       label: input.label,
+      ownerId: input.ownerId,
+      completionDelivery: input.completionDelivery,
       role: input.role,
       cwd: input.cwd,
       model: input.model,
@@ -174,10 +199,10 @@ export class OwnedRunRegistry {
   settle(id, result) {
     const record = this.records.get(id)
     this.active.delete(id)
-    if (!record) return
+    if (!record) return undefined
     if (this.interruptedByDispose.has(id) && record.status === 'interrupted') {
       this.interruptedByDispose.delete(id)
-      return
+      return { ...record }
     }
     record.status = 'settled'
     record.stopReason = cleanString(result?.stopReason, 100) ?? 'error'
@@ -187,10 +212,11 @@ export class OwnedRunRegistry {
     if (summary) record.outputSummary = summary
     record.updatedAt = this.now()
     this.persist()
+    return { ...record }
   }
 
   fail(id, error, aborted = false) {
-    this.settle(id, {
+    return this.settle(id, {
       stopReason: aborted ? 'aborted' : 'error',
       output: String(error?.message ?? error ?? ''),
     })
@@ -208,8 +234,9 @@ export class OwnedRunRegistry {
     }
   }
 
-  list({ channel, status, limit = 50, channelRegistry } = {}) {
+  list({ ownerId, channel, status, limit = 50, channelRegistry } = {}) {
     const rows = [...this.records.values()]
+      .filter((record) => ownerId === undefined || record.ownerId === ownerId)
       .filter((record) => channel === undefined || record.channel === channel)
       .filter((record) => status === undefined || record.status === status)
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
@@ -222,6 +249,30 @@ export class OwnedRunRegistry {
 
   read(id, channelRegistry) {
     return this.view(this.records.get(id), channelRegistry)
+  }
+
+  setNotification(id, notification) {
+    const record = this.records.get(id)
+    if (!record) return undefined
+    const safe = safeNotification(notification)
+    if (!safe) throw new Error('owned run notification is invalid')
+    record.notification = safe
+    record.updatedAt = this.now()
+    this.persist()
+    return { ...record }
+  }
+
+  findByNotificationMessage(messageId) {
+    return [...this.records.values()].find((record) => record.notification?.messageId === messageId)
+  }
+
+  pendingNotifications(ownerId) {
+    return [...this.records.values()].filter((record) => (
+      record.ownerId === ownerId
+      && record.completionDelivery === 'followup'
+      && ['settled', 'interrupted'].includes(record.status)
+      && record.notification?.state !== 'delivered'
+    ))
   }
 
   cancel(id, reason) {

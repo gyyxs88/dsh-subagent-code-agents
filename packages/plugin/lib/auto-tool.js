@@ -13,7 +13,7 @@ import z from '@deepseek-ai/schemastery'
 import { apply as applyTool, toolNames } from './tool.js'
 
 export const name = 'auto-tool-subagent-code-agents'
-export const inject = ['agents', 'agentPresets', 'tools', 'subagents']
+export const inject = ['agents', 'agentPresets', 'sessions', 'tools', 'subagents']
 
 export const Config = z.object({
   excludedPresets: z.array(z.string()).default(['minimal']),
@@ -33,7 +33,11 @@ export const apply = (ctx, config = {}) => {
   const excludedPresets = Array.isArray(config.excludedPresets)
     ? config.excludedPresets
     : ['minimal']
-  const injected = { subagents: ctx.subagents }
+  const injected = {
+    agents: ctx.agents,
+    sessions: ctx.sessions,
+    subagents: ctx.subagents,
+  }
   const mounted = new Map()
   let stopping = false
 
@@ -65,7 +69,7 @@ export const apply = (ctx, config = {}) => {
     // activation could introduce after agent/created. Pass the host plugin's
     // injected service explicitly because agent contexts isolate `subagents`.
     const cleanup = agent.ctx.effect(
-      () => applyTool(agent.ctx, {}, injected),
+      () => applyTool(agent.ctx, {}, { ...injected, ownerAgent: agent }),
       'coding-agent-tools.auto-mount()',
     )
     mounted.set(agent, cleanup)
