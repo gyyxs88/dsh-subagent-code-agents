@@ -32,8 +32,10 @@ function buildRunReport(record) {
       model: cleanText(record.model, 200) || null,
       status: record.status,
       stopReason: cleanText(record.stopReason, 100) || null,
-      outputSummary: cleanText(record.outputSummary, 1_000),
+      outcomeUnknown: record.outcomeUnknown === true,
+      outputSummary: cleanText(record.outputSummary, 16_000),
       sessionId: cleanText(record.sessionId, 500) || null,
+      turnId: cleanText(record.turnId, 500) || null,
       resumedFrom: cleanText(record.resumedFrom, 100) || null,
     },
   }

@@ -668,10 +668,16 @@ test('subagent_code end-to-end: tool → provider → channel with correct DSH r
     signal: new AbortController().signal,
   }
   const result = await tool.execute(
-    { channel: 'e2e-codex', description: 'do thing', prompt: 'please work', model: 'gpt-x', resume_session_id: 's1' },
+    { channel: 'e2e-codex', description: 'do thing', prompt: 'please work', model: 'gpt-x', resume_session_id: 's1', run_in_background: false },
     exec,
   )
   assert.equal(result.output[0].text, 'done')
+  assert.match(result.ownedRunId, /^run-/)
+  const foregroundRuns = await state.registeredTools.get('coding_runs_list').execute({}, exec)
+  assert.equal(foregroundRuns.runs.length, 1)
+  assert.equal(foregroundRuns.runs[0].id, result.ownedRunId)
+  assert.equal(foregroundRuns.runs[0].foreground, true)
+  assert.equal(foregroundRuns.runs[0].status, 'settled')
   // The DSH request must use ContentBlock prompt, parent, label and overrides.
   assert.deepEqual(receivedStart.request.prompt, [{ type: 'text', text: 'please work' }])
   assert.equal(receivedStart.request.parent, exec.agent)
@@ -716,6 +722,7 @@ test('subagent_code role supplies channel/instructions and explicit overrides', 
       prompt: 'Implement it.',
       model: 'explicit-model',
       reasoning_effort: 'xhigh',
+      run_in_background: false,
     },
     { agent: { id: 'a' }, signal: new AbortController().signal },
   )
@@ -726,6 +733,99 @@ test('subagent_code role supplies channel/instructions and explicit overrides', 
   assert.match(received.request.prompt[0].text, /Keep the patch minimal\./)
   assert.match(received.request.prompt[0].text, /Do not delegate/)
   registry.unregister('role-channel')
+})
+
+test('background-only role rejects foreground execution before starting a channel', async () => {
+  const { ctx, state } = makeCtx()
+  let starts = 0
+  ctx.subagents.start = async () => { starts++; throw new Error('must not start') }
+  registry.register({
+    id: 'advisor-channel',
+    displayName: 'Advisor',
+    capabilities: { run: true },
+    async run() {},
+  })
+  applyTool(ctx, {
+    roles: [{ id: 'action-advisor', channel: 'advisor-channel', backgroundOnly: true, executionPermission: 'read-only' }],
+  })
+  await assert.rejects(
+    state.registeredTools.get('subagent_code').execute(
+      { role: 'action-advisor', description: 'consult advisor', prompt: 'plan', run_in_background: false },
+      { agent: { id: 'owner' }, signal: new AbortController().signal },
+    ),
+    /requires run_in_background=true/u,
+  )
+  assert.equal(starts, 0)
+  registry.unregister('advisor-channel')
+})
+
+test('action-advisor role defaults to a background run with verified read-only policy', async () => {
+  const tasks = []
+  const jobs = { start(spec) { const task = spec.run(); tasks.push(task); return 'advisor-job' } }
+  let requestedPermission
+  let received
+  const resolver = async ({ exec, request }) => {
+    requestedPermission = request.executionPermission
+    return {
+      permission: request.executionPermission,
+      approvalOwner: 'target-session',
+      approvalMode: 'target-session',
+      workspaceRoot: 'C:/ws',
+      sourceSessionId: exec.agent.id,
+      targetSessionId: exec.agent.id,
+    }
+  }
+  const verifier = {
+    async verifyTargetSessionPolicy({ policy }) {
+      return { verified: true, authority: 'dsh-session-control', ...policy }
+    },
+  }
+  const { ctx, state } = makeCtx({
+    get(name) {
+      if (name === 'jobs') return jobs
+      if (name === 'dshSessionControlExecutionPolicyResolver') return resolver
+      if (name === 'dshSessionControlExecutionPolicyVerifier') return verifier
+      return undefined
+    },
+  })
+  ctx.subagents.start = async (name, request) => {
+    received = { name, request }
+    return {
+      id: 'advisor-child',
+      result: Promise.resolve({ stopReason: 'completed', output: [{ type: 'text', text: 'PLAN complete' }], sessionId: 'advisor-session' }),
+      async dispose() {},
+    }
+  }
+  registry.register({
+    id: 'advisor-role-channel',
+    displayName: 'Advisor',
+    capabilities: { run: true, modelOverride: true, effortOverride: true },
+    async run() {},
+  })
+  applyTool(ctx, {
+    roles: [{
+      id: 'action-advisor',
+      channel: 'advisor-role-channel',
+      model: 'gpt-5.6-sol',
+      reasoningEffort: 'xhigh',
+      executionPermission: 'read-only',
+      backgroundOnly: true,
+      allowDelegation: false,
+    }],
+  })
+  const owner = { id: 'owner', session: { header: { cwd: 'C:/ws' }, events: [] }, inbox: { nextTurn: [], nextStep: [] }, followup(message) { this.inbox.nextTurn.push(message) } }
+  const started = await state.registeredTools.get('subagent_code').execute(
+    { role: 'action-advisor', description: 'consult advisor', prompt: 'make a plan' },
+    { agent: owner, signal: new AbortController().signal },
+  )
+  assert.equal(started.kind, 'background')
+  assert.equal(requestedPermission, 'read-only')
+  assert.equal(received.request.executionPolicy.permission, 'read-only')
+  assert.equal(received.request.background, true)
+  await tasks[0].done
+  assert.equal(owner.inbox.nextTurn.length, 1)
+  assert.match(owner.inbox.nextTurn[0].content[0].text, /PLAN complete/u)
+  registry.unregister('advisor-role-channel')
 })
 
 test('background owned run settles, remains inspectable, and resumes as a linked new run', async () => {
@@ -744,6 +844,7 @@ test('background owned run settles, remains inspectable, and resumes as a linked
   const starts = []
   ctx.subagents.start = async (name, request) => {
     starts.push({ name, request })
+    request.onBinding?.({ sessionId: 'session-owned', turnId: `turn-${starts.length}` })
     return {
       id: `child-${starts.length}`,
       result: Promise.resolve({
@@ -774,11 +875,11 @@ test('background owned run settles, remains inspectable, and resumes as a linked
       channel: 'owned-channel',
       description: 'background work',
       prompt: 'secret prompt not persisted',
-      run_in_background: true,
     },
     { agent: owner, signal: new AbortController().signal },
   )
   assert.equal(started.kind, 'background')
+  assert.equal(starts[0].request.background, true)
   assert.equal(started.jobId, 'job-1')
   assert.match(started.runId, /^run-/)
   const renderedStart = state.registeredTools.get('subagent_code').output.render({}, started)[0].text
@@ -795,6 +896,7 @@ test('background owned run settles, remains inspectable, and resumes as a linked
   assert.equal(read.status, 'settled')
   assert.equal(read.continuation, 'resume_available')
   assert.equal(read.sessionId, 'session-owned')
+  assert.equal(read.turnId, 'turn-1')
   assert.ok(!Object.hasOwn(read, 'prompt'))
   await assert.rejects(() => state.registeredTools.get('coding_run_read').execute(
     { run_id: started.runId },
@@ -828,10 +930,11 @@ test('providerFromChannel parses ContentBlock prompt and derives cwd from parent
     id: 'codex',
     displayName: 'X',
     capabilities: { run: true },
-    async run(request) {
+    async run(request, env) {
       seen.prompt = request.prompt
       seen.cwd = request.cwd
       seen.parentCwd = request.parentCwd
+      env.onBinding?.({ sessionId: 'bound-session', turnId: 'bound-turn' })
       return { channel: 'codex', runId: 'r', stopReason: 'completed', output: 'ok', capabilities: { run: true } }
     },
   }
@@ -840,8 +943,10 @@ test('providerFromChannel parses ContentBlock prompt and derives cwd from parent
     label: 'l',
     prompt: [{ type: 'text', text: 'hello world' }],
     parent: { session: { header: { cwd: 'C:/parent' } } },
+    onBinding(binding) { seen.binding = binding },
   })
   await run.result
   assert.equal(seen.prompt, 'hello world')
   assert.equal(seen.parentCwd, 'C:/parent')
+  assert.deepEqual(seen.binding, { sessionId: 'bound-session', turnId: 'bound-turn' })
 })

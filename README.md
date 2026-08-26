@@ -79,7 +79,7 @@ packages/
 
 ## 工具接口
 
-- **`subagent_code`** — 必填 `description` / `prompt`，并提供 `channel` 或已配置的 `role`；可选 `model` / `reasoning_effort` / `resume_session_id` / `run_in_background` / `completion_delivery`。长期任务使用 `run_in_background=true` 后立即返回，默认 `completion_delivery=followup`：终态消息持久写入并自动唤醒拥有者会话，不再要求 `job_output` 轮询；显式轮询流程可选 `manual`。显式模型与强度覆盖角色默认值；模型必须使用渠道接受的完整 ID（Codex 例如 `gpt-5.6-sol`，不要写成 `sol`）；角色/通道冲突、未知角色和能力缺口都显式拒绝。
+- **`subagent_code`** — 必填 `description` / `prompt`，并提供 `channel` 或已配置的 `role`；可选 `model` / `reasoning_effort` / `resume_session_id` / `run_in_background` / `completion_delivery`。默认后台执行并立即返回，默认 `completion_delivery=followup`：终态消息持久写入并自动唤醒拥有者会话，不再要求 `job_output` 轮询；只有当前一轮必须同步依赖结果时才显式设 `run_in_background=false`，显式轮询流程可选 `manual`。显式模型与强度覆盖角色默认值；模型必须使用渠道接受的完整 ID（Codex 例如 `gpt-5.6-sol`，不要写成 `sol`）；角色/通道冲突、未知角色和能力缺口都显式拒绝。
 - **`coding_sessions_list`** — 必填 `channel`；默认按调用者 cwd 过滤，`include_all:true` 显式跨项目；`limit` 1..100。
 - **`coding_session_read`** — 必填 `channel` + `session_id`；`max_turns` 1..20。
 - **`coding_session_start`** — 必填 `channel` + `prompt`；可选 `model` / `reasoning_effort` / `cwd`，模型同样必须使用完整渠道 ID。
@@ -104,13 +104,23 @@ packages/
         reasoningEffort: xhigh
         instructions: '先审查证据，再提出最小修改。'
         allowDelegation: false
+      - id: action-advisor
+        channel: codex
+        model: gpt-5.6-sol
+        reasoningEffort: xhigh
+        executionPermission: read-only
+        backgroundOnly: true
+        instructions: '只研究、审计并输出可执行 PLAN/REPORT，不改文件、不调用其他代理。'
+        allowDelegation: false
 ```
 
-`allowDelegation: false` 会加入明确的角色指令，但它是行为约束，不是假装存在的进程级安全边界。
+默认 bundle 使用 `coding-agent-tools-auto` 把同一份工具配置挂到所有非 `minimal` Agent，因此全局角色应配置在该行；它会随新建 Agent 和 preset 切换生效，不绑定某个历史会话。
+
+`executionPermission` 只能把当前目标 Session 权限降为 `read-only` / `workspace-write` 或保持不变，不能通过角色提权；`backgroundOnly: true` 会拒绝前台调用。`allowDelegation: false` 会加入明确的角色指令，但它是行为约束，不是假装存在的进程级安全边界。
 
 ### 插件自有运行与重启
 
-后台运行登记默认写到 `<DSH_HOME>/dsh-subagent-code-agents/owned-runs.json`；也可用 `runRegistryPath` 指定位置。若两者都没有，则只在内存中登记。只保存拥有者 ID、通道、角色、模型、强度、cwd、sessionId、状态、最多 1000 字符输出摘要，以及终态通知的稳定消息 ID/摘要/投递状态；**不保存 prompt、密钥或登录态**。插件重启把未结算运行标为 `interrupted`，拥有者会话重新挂载后收到一次可去重回报，绝不冒充旧进程仍存活。
+插件创建的后台和显式前台运行都会先登记到 `<DSH_HOME>/dsh-subagent-code-agents/owned-runs.json`；也可用 `runRegistryPath` 指定位置。若两者都没有，则只在内存中登记。最多保留 100 条记录；只保存拥有者 ID、通道、角色、模型、强度、cwd、sessionId/turnId、状态、最多 16000 字符输出摘要、终态未知标记，以及终态通知的稳定消息 ID/摘要/投递状态；**不保存 prompt、密钥或登录态**。插件重启把未结算运行标为 `interrupted`，拥有者会话重新挂载后收到一次可去重回报，绝不冒充旧进程仍存活。
 
 bundle 还注册 `dsh-code-agents` Skill，要求 Agent 对长期任务默认后台派发后结束当前轮，并在插件自动回报后再验收；前台等待和 `completion_delivery=manual` 只用于真正的同轮依赖或显式审计。
 
@@ -248,7 +258,7 @@ ACP 实例按需追加；`id`/`name` 只写实例名，注册后是 `acp/<name>`
 | `codex_sessions_list` / `read` / `start` / `send` / `cancel` | `coding_sessions_list` / `coding_session_read` / `coding_session_start` / `coding_session_send` / `coding_session_cancel`（需显式 `channel: "codex"`） |
 | `tool-subagent-codex` 工具行 | bundle 自动策略（除 `minimal`）；有专属配置时仍可手工使用 `tool-subagent-code-agents` |
 
-权限策略不再固定 bypass：只有目标 Session 为 Full Access 时 Codex 才使用 `--dangerously-bypass-approvals-and-sandbox` 或 app-server `dangerFullAccess`；Read Only 使用官方受限 CLI，Workspace Write 必须走按 target Session 隔离的 Codex app-server approval bridge，不能用没有 server-request bridge 的 `codex exec` 冒充支持；无法兑现时显式拒绝。`appServerTurnTimeoutMs` 是独立于短 RPC timeout 的 turn 等待上限。
+权限策略不再固定 bypass：只有目标 Session 为 Full Access 时 Codex 才使用 `--dangerously-bypass-approvals-and-sandbox` 或 app-server `dangerFullAccess`；Read Only 使用官方受限 CLI，Workspace Write 必须走按 target Session 隔离的 Codex app-server approval bridge，不能用没有 server-request bridge 的 `codex exec` 冒充支持；无法兑现时显式拒绝。角色可以请求相对目标 Session 的权限降级，但不能提权。前台 app-server turn 使用独立的 `appServerTurnTimeoutMs`；后台 turn 没有固定十分钟上限，由拥有者取消、插件卸载或 Codex 终态结束。取消最多等待 `appServerCancelTimeoutMs`，仍无法证明终态时返回 `outcomeUnknown` 并退役该精确 app-server。插件不会重试外部 writer 冲突，也不会删除 Codex `thread-writer-locks`。
 
 ## 扩展渠道
 

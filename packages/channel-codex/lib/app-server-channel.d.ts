@@ -15,6 +15,7 @@ export class AppServerError extends Error {
   code: number
   detail?: unknown
   outcomeUnknown?: boolean
+  aborted?: boolean
 }
 
 export interface AppServerClientOptions {
@@ -36,6 +37,8 @@ export class AppServerClient {
   onNotification(handler: (method: string, params?: unknown) => void): () => boolean
   threadState(threadId: string): { status?: string; activeTurnId?: string; managed?: boolean } | undefined
   isManaged(threadId: string): boolean
+  activeTurnForThread(threadId: string): string | undefined
+  managedThreadIds(): string[]
   ensureStarted(): Promise<void>
   request(method: string, params?: object, opts?: { timeoutMs?: number }): Promise<any>
   threadList(opts?: object): Promise<{ threads: any[]; nextCursor: string | null; backwardsCursor: string | null }>
@@ -44,7 +47,9 @@ export class AppServerClient {
   threadResume(threadId: string, opts?: { model?: string }): Promise<any>
   turnStart(opts: object): Promise<any>
   turnSteer(opts: { threadId: string; input: unknown[]; expectedTurnId: string }): Promise<any>
-  waitForTurn(turnId: string, opts?: { timeoutMs?: number }): Promise<{ threadId?: string; turnId: string; status: string; output: string }>
+  turnInterrupt(threadId: string, turnId: string): Promise<any>
+  threadUnsubscribe(threadId: string): Promise<any>
+  waitForTurn(turnId: string, opts?: { timeoutMs?: number | null; signal?: AbortSignal }): Promise<{ threadId?: string; turnId: string; status: string; output: string }>
   dispose(): Promise<void>
 }
 
@@ -59,6 +64,8 @@ export function createCodexAppServerChannel(options?: {
   codexJs?: string
   appServerRequestTimeoutMs?: number
   appServerTurnTimeoutMs?: number
+  appServerBackgroundTurnTimeoutMs?: number | null
+  appServerCancelTimeoutMs?: number
   logger?: { info: Function; warn: Function; error: Function }
   cwd?: string
 }): CodingAgentChannel

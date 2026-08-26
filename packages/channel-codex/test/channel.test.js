@@ -561,6 +561,152 @@ test('Workspace Write run uses Codex app-server turn and target-session approval
   assert.deepEqual(approvalReply.result, { decision: 'accept' })
 })
 
+test('Workspace Write resumes a thread already loaded by the same app-server without thread/resume', async () => {
+  const methods = []
+  let turn = 0
+  const policy = {
+    permission: 'workspace-write',
+    approvalOwner: 'target-session',
+    approvalMode: 'target-session',
+    sourceSessionId: 'controller-a',
+    targetSessionId: 'target-a',
+    provenance: { authority: 'dsh-session-control', verified: true },
+    workspaceRoot: 'C:/ws',
+    approvalHandler: async () => ({ approved: true }),
+  }
+  const { handle } = makeScriptedSpawn((msg, processHandle) => {
+    methods.push(msg.method)
+    if (msg.method === 'initialize') return setImmediate(() => processHandle._data(Buffer.from(JSON.stringify({ id: msg.id, result: {} }) + '\n')))
+    if (msg.method === 'thread/start') return setImmediate(() => processHandle._data(Buffer.from(JSON.stringify({ id: msg.id, result: { thread: { id: 'thread-reused', status: { type: 'idle' } } } }) + '\n')))
+    if (msg.method === 'thread/resume') return setImmediate(() => processHandle._data(Buffer.from(JSON.stringify({ id: msg.id, error: { code: -32600, message: 'already has an active writer' } }) + '\n')))
+    if (msg.method === 'turn/start') {
+      const turnId = `turn-${++turn}`
+      return setImmediate(() => {
+        processHandle._data(Buffer.from(JSON.stringify({ id: msg.id, result: { turn: { id: turnId, status: 'inProgress' } } }) + '\n'))
+        processHandle._data(Buffer.from(JSON.stringify({ method: 'turn/completed', params: { threadId: 'thread-reused', turn: { id: turnId, status: 'completed', items: [{ type: 'agentMessage', text: `output-${turn}` }] } } }) + '\n'))
+      })
+    }
+  })
+  const env = makeEnv({ executionPolicy: policy, subprocess: { async resolveExecutable() { return 'C:/fake/codex.exe' }, spawn() { return handle } } })
+  const channel = createCodexAppServerChannel({ codexJs: 'C:/fake/bin/codex.js' })
+  const first = await channel.run({ prompt: 'first', cwd: 'C:/ws' }, env)
+  const second = await channel.resume({ prompt: 'second', cwd: 'C:/ws', resumeSessionId: first.sessionId }, env)
+  assert.equal(first.output, 'output-1')
+  assert.equal(second.output, 'output-2')
+  assert.equal(methods.filter((method) => method === 'thread/start').length, 1)
+  assert.equal(methods.filter((method) => method === 'thread/resume').length, 0)
+  assert.equal(methods.filter((method) => method === 'turn/start').length, 2)
+})
+
+test('Workspace Write turn timeout interrupts the owned turn and settles before returning', async () => {
+  const methods = []
+  const policy = {
+    permission: 'workspace-write',
+    approvalOwner: 'target-session',
+    approvalMode: 'target-session',
+    sourceSessionId: 'controller-a',
+    targetSessionId: 'target-a',
+    provenance: { authority: 'dsh-session-control', verified: true },
+    workspaceRoot: 'C:/ws',
+    approvalHandler: async () => ({ approved: true }),
+  }
+  const { handle, captured } = makeScriptedSpawn((msg, processHandle) => {
+    methods.push(msg.method)
+    if (msg.method === 'initialize') return setImmediate(() => processHandle._data(Buffer.from(JSON.stringify({ id: msg.id, result: {} }) + '\n')))
+    if (msg.method === 'thread/start') return setImmediate(() => processHandle._data(Buffer.from(JSON.stringify({ id: msg.id, result: { thread: { id: 'thread-timeout', status: { type: 'idle' } } } }) + '\n')))
+    if (msg.method === 'turn/start') return setImmediate(() => processHandle._data(Buffer.from(JSON.stringify({ id: msg.id, result: { turn: { id: 'turn-timeout', status: 'inProgress' } } }) + '\n')))
+    if (msg.method === 'turn/interrupt') {
+      return setImmediate(() => {
+        processHandle._data(Buffer.from(JSON.stringify({ id: msg.id, result: {} }) + '\n'))
+        processHandle._data(Buffer.from(JSON.stringify({ method: 'turn/completed', params: { threadId: 'thread-timeout', turn: { id: 'turn-timeout', status: 'interrupted', items: [] } } }) + '\n'))
+      })
+    }
+  })
+  const env = makeEnv({ executionPolicy: policy, subprocess: { async resolveExecutable() { return 'C:/fake/codex.exe' }, spawn() { return handle } } })
+  const channel = createCodexAppServerChannel({ codexJs: 'C:/fake/bin/codex.js', appServerTurnTimeoutMs: 25, appServerCancelTimeoutMs: 100 })
+  const result = await channel.run({ prompt: 'timeout', cwd: 'C:/ws' }, env)
+  assert.equal(result.stopReason, 'error')
+  assert.equal(result.outcomeUnknown, false)
+  assert.ok(methods.includes('turn/interrupt'))
+  assert.equal(captured.terminated, false)
+})
+
+test('concurrent resume of one Workspace Write thread is refused with the active operation', async () => {
+  const policy = {
+    permission: 'workspace-write', approvalOwner: 'target-session', approvalMode: 'target-session',
+    sourceSessionId: 'controller-a', targetSessionId: 'target-a', workspaceRoot: 'C:/ws',
+    provenance: { authority: 'dsh-session-control', verified: true },
+    approvalHandler: async () => ({ approved: true }),
+  }
+  let startedResolve
+  const started = new Promise((resolve) => { startedResolve = resolve })
+  let finish
+  const { handle } = makeScriptedSpawn((msg, processHandle) => {
+    if (msg.method === 'initialize') return setImmediate(() => processHandle._data(Buffer.from(JSON.stringify({ id: msg.id, result: {} }) + '\n')))
+    if (msg.method === 'thread/resume') return setImmediate(() => processHandle._data(Buffer.from(JSON.stringify({ id: msg.id, result: { thread: { id: 'thread-shared', status: { type: 'idle' } } } }) + '\n')))
+    if (msg.method === 'turn/start') {
+      return setImmediate(() => {
+        processHandle._data(Buffer.from(JSON.stringify({ id: msg.id, result: { turn: { id: 'turn-shared', status: 'inProgress' } } }) + '\n'))
+        finish = () => processHandle._data(Buffer.from(JSON.stringify({ method: 'turn/completed', params: { threadId: 'thread-shared', turn: { id: 'turn-shared', status: 'completed', items: [] } } }) + '\n'))
+        startedResolve()
+      })
+    }
+  })
+  const env = makeEnv({ executionPolicy: policy, subprocess: { async resolveExecutable() { return 'C:/fake/codex.exe' }, spawn() { return handle } } })
+  const channel = createCodexAppServerChannel({ codexJs: 'C:/fake/bin/codex.js', appServerTurnTimeoutMs: 60_000 })
+  const firstPromise = channel.resume({ prompt: 'first', cwd: 'C:/ws', resumeSessionId: 'thread-shared' }, env)
+  await started
+  const second = await channel.resume({ prompt: 'second', cwd: 'C:/ws', resumeSessionId: 'thread-shared' }, env)
+  assert.equal(second.stopReason, 'error')
+  assert.equal(second.delivery, 'active_managed')
+  assert.match(second.output, /in-flight managed operation/u)
+  finish()
+  assert.equal((await firstPromise).stopReason, 'completed')
+})
+
+test('unknown cancellation outcome stops the exact owned app-server', async () => {
+  const policy = {
+    permission: 'workspace-write', approvalOwner: 'target-session', approvalMode: 'target-session',
+    sourceSessionId: 'controller-a', targetSessionId: 'target-a', workspaceRoot: 'C:/ws',
+    provenance: { authority: 'dsh-session-control', verified: true },
+    approvalHandler: async () => ({ approved: true }),
+  }
+  const { handle, captured } = makeScriptedSpawn((msg, processHandle) => {
+    if (msg.method === 'initialize') return setImmediate(() => processHandle._data(Buffer.from(JSON.stringify({ id: msg.id, result: {} }) + '\n')))
+    if (msg.method === 'thread/start') return setImmediate(() => processHandle._data(Buffer.from(JSON.stringify({ id: msg.id, result: { thread: { id: 'thread-unknown', status: { type: 'idle' } } } }) + '\n')))
+    if (msg.method === 'turn/start') return setImmediate(() => processHandle._data(Buffer.from(JSON.stringify({ id: msg.id, result: { turn: { id: 'turn-unknown', status: 'inProgress' } } }) + '\n')))
+    // turn/interrupt intentionally loses its response and terminal notification.
+  })
+  const env = makeEnv({ executionPolicy: policy, subprocess: { async resolveExecutable() { return 'C:/fake/codex.exe' }, spawn() { return handle } } })
+  const channel = createCodexAppServerChannel({ codexJs: 'C:/fake/bin/codex.js', appServerRequestTimeoutMs: 20, appServerTurnTimeoutMs: 20, appServerCancelTimeoutMs: 20 })
+  const result = await channel.run({ prompt: 'unknown', cwd: 'C:/ws' }, env)
+  assert.equal(result.stopReason, 'error')
+  assert.equal(result.outcomeUnknown, true)
+  assert.equal(captured.terminated, true)
+})
+
+test('external writer conflict is structured and never retried or lock-deleted', async () => {
+  const methods = []
+  const policy = {
+    permission: 'workspace-write', approvalOwner: 'target-session', approvalMode: 'target-session',
+    sourceSessionId: 'controller-a', targetSessionId: 'target-a', workspaceRoot: 'C:/ws',
+    provenance: { authority: 'dsh-session-control', verified: true },
+    approvalHandler: async () => ({ approved: true }),
+  }
+  const { handle, captured } = makeScriptedSpawn((msg, processHandle) => {
+    methods.push(msg.method)
+    if (msg.method === 'initialize') return setImmediate(() => processHandle._data(Buffer.from(JSON.stringify({ id: msg.id, result: {} }) + '\n')))
+    if (msg.method === 'thread/resume') return setImmediate(() => processHandle._data(Buffer.from(JSON.stringify({ id: msg.id, error: { code: -32600, message: 'thread-store conflict: already has an active writer' } }) + '\n')))
+  })
+  const env = makeEnv({ executionPolicy: policy, subprocess: { async resolveExecutable() { return 'C:/fake/codex.exe' }, spawn() { return handle } } })
+  const channel = createCodexAppServerChannel({ codexJs: 'C:/fake/bin/codex.js' })
+  const result = await channel.resume({ prompt: 'resume', cwd: 'C:/ws', resumeSessionId: 'external-thread' }, env)
+  assert.equal(result.errorCode, 'CODEX_THREAD_EXTERNALLY_OWNED')
+  assert.equal(result.outcomeUnknown, true)
+  assert.equal(methods.filter((method) => method === 'thread/resume').length, 1)
+  assert.equal(captured.terminated, true)
+})
+
 test('Codex app-server isolates interleaved Workspace Write approvals by target Session', async () => {
   const approvals = []
   const handles = new Map()

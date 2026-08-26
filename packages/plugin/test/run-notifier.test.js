@@ -40,16 +40,19 @@ test('settled background run follows up its owner exactly once', async () => {
       completionDelivery: 'followup',
     })
     ownedRuns.setJobId(record.id, 'job-1')
+    const fullPlan = `PLAN\n${'step '.repeat(1_000)}final-acceptance-marker`
     ownedRuns.settle(record.id, {
       stopReason: 'completed',
       sessionId: 'codex-session',
-      output: [{ type: 'text', text: 'implemented and verified' }],
+      turnId: 'codex-turn',
+      output: [{ type: 'text', text: fullPlan }],
     })
     await notifier.request(record.id, owner)
     assert.equal(owner.inbox.nextTurn.length, 1)
     assert.equal(owner.inbox.nextTurn[0].source.plugin, 'dsh-subagent-code-agents')
     assert.equal(owner.inbox.nextTurn[0].source.form, 'run-terminal-report')
-    assert.match(owner.inbox.nextTurn[0].content[0].text, /implemented and verified/u)
+    assert.match(owner.inbox.nextTurn[0].content[0].text, /final-acceptance-marker/u)
+    assert.match(owner.inbox.nextTurn[0].content[0].text, /"turnId":"codex-turn"/u)
     assert.equal(ownedRuns.read(record.id).notification.state, 'delivered')
 
     await notifier.request(record.id, owner)
