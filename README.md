@@ -124,6 +124,8 @@ packages/
 
 bundle 还注册 `dsh-code-agents` Skill，要求 Agent 对长期任务默认后台派发后结束当前轮，并在插件自动回报后再验收；前台等待和 `completion_delivery=manual` 只用于真正的同轮依赖或显式审计。
 
+`completion_delivery=followup` 由插件自己的持久终态回报独占完成通知；它会在 DSH jobs registry 中预先认领该次终态，抑制通用的“请用 job_output 读取”重复通知。`manual` 保留 DSH 原生 jobs 通知与显式读取语义。
+
 进程重启时，磁盘上所有 `running` 记录都会转换为 `interrupted`，绝不伪装为仍在运行。仅当记录含 sessionId 且当前通道支持 resume 时，`continuation` 才为 `resume_available`；否则为 `unavailable`。
 
 > 工具名统一为：`subagent_code`、`coding_sessions_list`（复数，列表）、`coding_session_read/start/send`（单数，单会话操作）。不暴露旧工具名 `subagent_codex`（旧插件保留它，新插件不用），也不提供旧的 plural 别名。

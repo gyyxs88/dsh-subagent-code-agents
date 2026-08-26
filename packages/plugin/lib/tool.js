@@ -17,6 +17,8 @@ import { loadRoleRegistry, resolveRoleInvocation } from './roles.js'
 import { defaultRunRegistryPath, jobOutcomeFor, OwnedRunRegistry, sharedOwnedRunRegistry } from './owned-runs.js'
 import { createRunNotifier } from './run-notifier.js'
 
+const JOB_NOTICE_CLAIM_WAIT_MS = 2_147_000_000
+
 export const name = 'tool-subagent-code-agents'
 export const inject = ['agents', 'sessions', 'tools', 'subagents']
 
@@ -184,6 +186,22 @@ export const apply = (ctx, config = {}, injected = {}) => {
     return jobs
   }
 
+  const claimNativeJobNotice = (jobs, jobId, owner) => {
+    if (typeof jobs.wait !== 'function') {
+      ctx.logger.warn(`coding-agent run ${jobId}: jobs.wait unavailable; generic completion notice may duplicate the durable run report`)
+      return
+    }
+    const claim = async () => {
+      while (true) {
+        const snapshot = await jobs.wait(jobId, JOB_NOTICE_CLAIM_WAIT_MS, owner)
+        if (!['running', 'stopping'].includes(snapshot.status)) return
+      }
+    }
+    claim().catch((error) => {
+      ctx.logger.warn(`coding-agent run ${jobId}: could not claim generic completion notice: ${String(error?.message ?? error)}`)
+    })
+  }
+
   const startOwnedBackground = ({
     jobs,
     providerName,
@@ -243,6 +261,7 @@ export const apply = (ctx, config = {}, injected = {}) => {
       throw error
     }
     ownedRuns.setJobId(record.id, jobId)
+    if (completionDelivery === 'followup') claimNativeJobNotice(jobs, jobId, owner)
     return { kind: 'background', jobId, runId: record.id, completionDelivery }
   }
 

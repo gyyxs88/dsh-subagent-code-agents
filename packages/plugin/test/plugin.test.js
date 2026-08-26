@@ -761,7 +761,14 @@ test('background-only role rejects foreground execution before starting a channe
 
 test('action-advisor role defaults to a background run with verified read-only policy', async () => {
   const tasks = []
-  const jobs = { start(spec) { const task = spec.run(); tasks.push(task); return 'advisor-job' } }
+  const waitCalls = []
+  const jobs = {
+    start(spec) { const task = spec.run(); tasks.push(task); return 'advisor-job' },
+    wait(id, timeoutMs, owner) {
+      waitCalls.push({ id, timeoutMs, owner })
+      return new Promise(() => {})
+    },
+  }
   let requestedPermission
   let received
   const resolver = async ({ exec, request }) => {
@@ -822,6 +829,9 @@ test('action-advisor role defaults to a background run with verified read-only p
   assert.equal(requestedPermission, 'read-only')
   assert.equal(received.request.executionPolicy.permission, 'read-only')
   assert.equal(received.request.background, true)
+  assert.equal(waitCalls.length, 1)
+  assert.equal(waitCalls[0].id, 'advisor-job')
+  assert.equal(waitCalls[0].owner, owner)
   await tasks[0].done
   assert.equal(owner.inbox.nextTurn.length, 1)
   assert.match(owner.inbox.nextTurn[0].content[0].text, /PLAN complete/u)
@@ -830,12 +840,17 @@ test('action-advisor role defaults to a background run with verified read-only p
 
 test('background owned run settles, remains inspectable, and resumes as a linked new run', async () => {
   const tasks = []
+  const waitCalls = []
   let nextJob = 0
   const jobs = {
     start(spec) {
       const task = spec.run()
       tasks.push(task)
       return `job-${++nextJob}`
+    },
+    wait(id, timeoutMs, owner) {
+      waitCalls.push({ id, timeoutMs, owner })
+      return new Promise(() => {})
     },
   }
   const { ctx, state } = makeCtx({
@@ -881,6 +896,7 @@ test('background owned run settles, remains inspectable, and resumes as a linked
   assert.equal(started.kind, 'background')
   assert.equal(starts[0].request.background, true)
   assert.equal(started.jobId, 'job-1')
+  assert.equal(waitCalls.length, 1)
   assert.match(started.runId, /^run-/)
   const renderedStart = state.registeredTools.get('subagent_code').output.render({}, started)[0].text
   assert.match(renderedStart, /job-1/)
@@ -913,6 +929,7 @@ test('background owned run settles, remains inspectable, and resumes as a linked
     { agent: owner },
   )
   assert.equal(resumed.jobId, 'job-2')
+  assert.equal(waitCalls.length, 2)
   assert.equal(starts[1].request.resumeSessionId, 'session-owned')
   assert.deepEqual(await tasks[1].done, { status: 'completed', output: 'done-2' })
   assert.equal(ownerInbox.length, 2)
@@ -921,6 +938,20 @@ test('background owned run settles, remains inspectable, and resumes as a linked
     { agent: owner },
   )
   assert.equal(resumedRead.resumedFrom, started.runId)
+
+  const manual = await state.registeredTools.get('subagent_code').execute(
+    {
+      channel: 'owned-channel',
+      description: 'manual background work',
+      prompt: 'manual result collection',
+      completion_delivery: 'manual',
+    },
+    { agent: owner, signal: new AbortController().signal },
+  )
+  assert.equal(manual.jobId, 'job-3')
+  assert.equal(waitCalls.length, 2)
+  assert.deepEqual(await tasks[2].done, { status: 'completed', output: 'done-3' })
+  assert.equal(ownerInbox.length, 2)
   registry.unregister('owned-channel')
 })
 
