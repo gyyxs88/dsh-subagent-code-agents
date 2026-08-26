@@ -48,7 +48,9 @@ test('settled run persists bounded metadata without the prompt', () => {
     owned.settle(record.id, {
       stopReason: 'completed',
       sessionId: 'session-1',
-      output: [{ type: 'text', text: 'A'.repeat(1500) }],
+      turnId: 'turn-1',
+      outcomeUnknown: true,
+      output: [{ type: 'text', text: 'A'.repeat(20_000) }],
     })
     const raw = fs.readFileSync(file, 'utf8')
     assert.ok(!raw.includes('must never be saved'))
@@ -56,8 +58,10 @@ test('settled run persists bounded metadata without the prompt', () => {
     const view = reloaded.read(record.id, resumableChannels)
     assert.equal(view.status, 'settled')
     assert.equal(view.continuation, 'resume_available')
-    assert.equal(view.outputSummary.length, 1000)
+    assert.equal(view.outputSummary.length, 16_000)
     assert.equal(view.jobId, 'job-1')
+    assert.equal(view.turnId, 'turn-1')
+    assert.equal(view.outcomeUnknown, true)
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }

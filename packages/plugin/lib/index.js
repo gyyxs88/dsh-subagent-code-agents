@@ -61,6 +61,7 @@ export const Config = z.object({
   runtimeManagerTimeoutMs: z.number().step(1).min(100).default(10_000),
   appServerRequestTimeoutMs: z.number().step(1).min(1000).default(30_000),
   appServerTurnTimeoutMs: z.number().step(1).min(10_000).default(10 * 60_000),
+  appServerCancelTimeoutMs: z.number().step(1).min(1000).default(30_000),
 })
 
 export const CHANNEL_FACTORIES = Object.freeze({
@@ -72,6 +73,7 @@ export const CHANNEL_FACTORIES = Object.freeze({
       codexJs: cfg.codexJs,
       appServerRequestTimeoutMs: cfg.appServerRequestTimeoutMs,
       appServerTurnTimeoutMs: cfg.appServerTurnTimeoutMs,
+      appServerCancelTimeoutMs: cfg.appServerCancelTimeoutMs,
       cwd: cfg.cwd,
       runtimeRequirement: cfg.runtimeRequirement,
     }),
@@ -264,6 +266,10 @@ export function providerFromChannel(channel, env, providerName) {
           try { env.onUpdate?.(update) } catch {}
           updates.push(update)
         },
+        onBinding(binding) {
+          try { request.onBinding?.(binding) } catch {}
+          try { env.onBinding?.(binding) } catch {}
+        },
       }
       const result = channel
         .run(runRequest, envWithSignal)
@@ -271,6 +277,9 @@ export function providerFromChannel(channel, env, providerName) {
           output: [{ type: 'text', text: r.output }],
           stopReason: toSubagentStopReason(r),
           ...(r.sessionId === undefined ? {} : { sessionId: r.sessionId }),
+          ...(r.turnId === undefined ? {} : { turnId: r.turnId }),
+          ...(r.outcomeUnknown === undefined ? {} : { outcomeUnknown: r.outcomeUnknown }),
+          ...(r.errorCode === undefined ? {} : { errorCode: r.errorCode }),
           ...(r.delivery === undefined ? {} : { delivery: r.delivery }),
           ...(r.mayBeConcurrent === undefined ? {} : { mayBeConcurrent: r.mayBeConcurrent }),
           channel: r.channel,
@@ -434,6 +443,7 @@ export const apply = (ctx, config = {}) => {
     runtimeManagerTimeoutMs: config.runtimeManagerTimeoutMs,
     appServerRequestTimeoutMs: config.appServerRequestTimeoutMs,
     appServerTurnTimeoutMs: config.appServerTurnTimeoutMs,
+    appServerCancelTimeoutMs: config.appServerCancelTimeoutMs,
   }
   // Config validation supplies the default `channels: []` even for the
   // bundle's one-row `channel: codex` form. An empty multi-row list must not

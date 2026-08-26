@@ -7,6 +7,7 @@ const PREFIX = 'dsh-subagent-code-agents roles'
 const MAX_FILE_BYTES = 256 * 1024
 const MAX_ROLES = 100
 const ROLE_ID_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/u
+const EXECUTION_PERMISSIONS = new Set(['read-only', 'workspace-write', 'danger-full-access'])
 
 function boundedString(value, field, { required = false, max = 16_000 } = {}) {
   if (value === undefined && !required) return undefined
@@ -32,6 +33,17 @@ export function normalizeRole(raw) {
   if (raw.allowDelegation !== undefined && typeof raw.allowDelegation !== 'boolean') {
     throw new Error(`${PREFIX}: role "${id}" allowDelegation must be boolean`)
   }
+  if (raw.backgroundOnly !== undefined && typeof raw.backgroundOnly !== 'boolean') {
+    throw new Error(`${PREFIX}: role "${id}" backgroundOnly must be boolean`)
+  }
+  const executionPermission = boundedString(
+    raw.executionPermission ?? raw.execution_permission,
+    `role "${id}" executionPermission`,
+    { max: 64 },
+  )
+  if (executionPermission !== undefined && !EXECUTION_PERMISSIONS.has(executionPermission)) {
+    throw new Error(`${PREFIX}: role "${id}" executionPermission is unsupported`)
+  }
   return Object.freeze({
     id,
     channel,
@@ -43,6 +55,8 @@ export function normalizeRole(raw) {
     ),
     instructions: boundedString(raw.instructions, `role "${id}" instructions`, { max: 16_000 }),
     allowDelegation: raw.allowDelegation !== false,
+    backgroundOnly: raw.backgroundOnly === true,
+    executionPermission,
   })
 }
 
@@ -108,6 +122,8 @@ export function resolveRoleInvocation(args, roles) {
       model: args.model,
       reasoningEffort: args.reasoning_effort,
       prompt: args.prompt,
+      backgroundOnly: false,
+      executionPermission: undefined,
     }
   }
   const role = roles.get(roleId)
@@ -125,5 +141,7 @@ export function resolveRoleInvocation(args, roles) {
     model: args.model ?? role.model,
     reasoningEffort: args.reasoning_effort ?? role.reasoningEffort,
     prompt: rolePrompt(role, args.prompt),
+    backgroundOnly: role.backgroundOnly,
+    executionPermission: role.executionPermission,
   }
 }

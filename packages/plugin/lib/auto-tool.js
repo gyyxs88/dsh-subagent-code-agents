@@ -17,6 +17,20 @@ export const inject = ['agents', 'agentPresets', 'sessions', 'tools', 'subagents
 
 export const Config = z.object({
   excludedPresets: z.array(z.string()).default(['minimal']),
+  providerPrefix: z.string().default('coding-agent'),
+  enableRunInBackground: z.boolean().default(true),
+  runRegistryPath: z.string(),
+  rolesFile: z.string(),
+  roles: z.array(z.object({
+    id: z.string(),
+    channel: z.string(),
+    model: z.string(),
+    reasoningEffort: z.string(),
+    instructions: z.string(),
+    allowDelegation: z.boolean().default(true),
+    backgroundOnly: z.boolean().default(false),
+    executionPermission: z.string(),
+  })).default([]),
 })
 
 export function presetAllowsAutoTools(presetId, excludedPresets = ['minimal']) {
@@ -69,7 +83,7 @@ export const apply = (ctx, config = {}) => {
     // activation could introduce after agent/created. Pass the host plugin's
     // injected service explicitly because agent contexts isolate `subagents`.
     const cleanup = agent.ctx.effect(
-      () => applyTool(agent.ctx, {}, { ...injected, ownerAgent: agent }),
+      () => applyTool(agent.ctx, config, { ...injected, ownerAgent: agent }),
       'coding-agent-tools.auto-mount()',
     )
     mounted.set(agent, cleanup)

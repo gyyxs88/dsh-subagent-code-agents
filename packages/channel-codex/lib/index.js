@@ -149,6 +149,7 @@ export async function runCodexExec({ env, request, resumeSessionId, capabilities
       env.onUpdate?.({ type: 'text-delta', text: event.item.text })
     } else if (event.type === 'thread.started' && typeof event.thread_id === 'string') {
       startedThreadId = event.thread_id
+      env.onBinding?.({ sessionId: startedThreadId })
     } else if (event.type === 'turn.completed' || event.type === 'thread.completed') {
       sawTurnCompleted = true
     } else if (event.type === 'turn.failed') {

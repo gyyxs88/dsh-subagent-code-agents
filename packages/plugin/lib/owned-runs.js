@@ -13,8 +13,8 @@ import { randomUUID } from 'node:crypto'
 import { hasCapability } from '@dsh-subagent-code-agents/core'
 
 const VERSION = 1
-const MAX_RUNS = 1000
-const MAX_SUMMARY = 1000
+const MAX_RUNS = 100
+const MAX_SUMMARY = 16_000
 const VALID_STATUS = new Set(['running', 'settled', 'interrupted'])
 const VALID_NOTIFICATION_STATE = new Set(['reserved', 'delivering', 'retryable', 'delivery-unknown', 'delivered'])
 const SHARED_FILE_REGISTRIES = new Map()
@@ -71,6 +71,9 @@ function safeRecord(raw) {
       ? { reasoningEffort: cleanString(raw.reasoningEffort, 100) }
       : {}),
     ...(cleanString(raw.sessionId, 500) ? { sessionId: cleanString(raw.sessionId, 500) } : {}),
+    ...(cleanString(raw.turnId, 500) ? { turnId: cleanString(raw.turnId, 500) } : {}),
+    ...(raw.foreground === true ? { foreground: true } : {}),
+    ...(raw.outcomeUnknown === true ? { outcomeUnknown: true } : {}),
     ...(cleanString(raw.stopReason, 100) ? { stopReason: cleanString(raw.stopReason, 100) } : {}),
     ...(cleanString(raw.outputSummary, MAX_SUMMARY)
       ? { outputSummary: cleanString(raw.outputSummary, MAX_SUMMARY) }
@@ -110,7 +113,7 @@ export class OwnedRunRegistry {
     let parsed
     try {
       const stat = fs.statSync(this.filePath)
-      if (!stat.isFile() || stat.size > 2 * 1024 * 1024) throw new Error('registry file is invalid or too large')
+      if (!stat.isFile() || stat.size > 4 * 1024 * 1024) throw new Error('registry file is invalid or too large')
       parsed = JSON.parse(fs.readFileSync(this.filePath, 'utf8'))
       if (parsed?.version !== VERSION || !Array.isArray(parsed.runs)) throw new Error('unsupported registry format')
     } catch (error) {
@@ -170,6 +173,7 @@ export class OwnedRunRegistry {
       model: input.model,
       reasoningEffort: input.reasoningEffort,
       sessionId: input.sessionId,
+      foreground: input.foreground === true,
       resumedFrom: input.resumedFrom,
       status: 'running',
       createdAt: timestamp,
@@ -196,6 +200,18 @@ export class OwnedRunRegistry {
     this.persist()
   }
 
+  bind(id, binding = {}) {
+    const record = this.records.get(id)
+    if (!record) return undefined
+    const sessionId = cleanString(binding.sessionId, 500)
+    const turnId = cleanString(binding.turnId, 500)
+    if (sessionId) record.sessionId = sessionId
+    if (turnId) record.turnId = turnId
+    record.updatedAt = this.now()
+    this.persist()
+    return { ...record }
+  }
+
   settle(id, result) {
     const record = this.records.get(id)
     this.active.delete(id)
@@ -208,6 +224,9 @@ export class OwnedRunRegistry {
     record.stopReason = cleanString(result?.stopReason, 100) ?? 'error'
     const sessionId = cleanString(result?.sessionId, 500)
     if (sessionId) record.sessionId = sessionId
+    const turnId = cleanString(result?.turnId, 500)
+    if (turnId) record.turnId = turnId
+    record.outcomeUnknown = result?.outcomeUnknown === true
     const summary = cleanString(outputText(result?.output).trim(), MAX_SUMMARY)
     if (summary) record.outputSummary = summary
     record.updatedAt = this.now()

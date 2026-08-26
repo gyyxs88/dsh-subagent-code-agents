@@ -15,6 +15,8 @@ test('role supplies channel/defaults/instructions while explicit model and effor
       reasoningEffort: 'high',
       instructions: 'Review before changing files.',
       allowDelegation: false,
+      backgroundOnly: true,
+      executionPermission: 'read-only',
     }],
   })
   const invocation = resolveRoleInvocation({
@@ -27,6 +29,8 @@ test('role supplies channel/defaults/instructions while explicit model and effor
   assert.equal(invocation.role, 'reviewer')
   assert.equal(invocation.model, 'explicit-model')
   assert.equal(invocation.reasoningEffort, 'xhigh')
+  assert.equal(invocation.backgroundOnly, true)
+  assert.equal(invocation.executionPermission, 'read-only')
   assert.match(invocation.prompt, /Review before changing files\./)
   assert.match(invocation.prompt, /Do not delegate/)
   assert.match(invocation.prompt, /Fix the bug\./)
@@ -61,6 +65,10 @@ test('invalid and duplicate roles are rejected eagerly', () => {
       ],
     }),
     /duplicate role id "same"/,
+  )
+  assert.throws(
+    () => loadRoleRegistry({ roles: [{ id: 'bad-permission', channel: 'codex', executionPermission: 'root' }] }),
+    /executionPermission is unsupported/,
   )
 })
 

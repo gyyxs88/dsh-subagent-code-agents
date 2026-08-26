@@ -229,14 +229,21 @@ test('auto-mounted subagent_code uses the host-injected service across agent iso
     agents.push(agent)
     assert.throws(() => agentCtx.subagents, /cannot get property "subagents" without inject/)
 
-    autoFiber = ctx.plugin(AutoToolPlugin)
+    autoFiber = ctx.plugin(AutoToolPlugin, {
+      roles: [{
+        id: 'auto-role',
+        channel: channelId,
+        instructions: 'Return exactly the marker.',
+        allowDelegation: false,
+      }],
+    })
     await autoFiber
     const tool = registeredTools.get('subagent_code')
     assert.ok(tool, 'subagent_code must be auto-mounted')
 
     const result = await tool.execute(
       {
-        channel: channelId,
+        role: 'auto-role',
         description: 'verify injected service',
         prompt: 'Return the marker.',
         run_in_background: false,
@@ -246,6 +253,7 @@ test('auto-mounted subagent_code uses the host-injected service across agent iso
     assert.equal(result.output[0].text, 'AUTO_INJECT_OK')
     assert.equal(starts.length, 1)
     assert.equal(starts[0].name, `coding-agent/${channelId}`)
+    assert.match(starts[0].request.prompt[0].text, /Configured role: auto-role/u)
   } finally {
     await autoFiber?.dispose()
     await agentFiber.dispose()

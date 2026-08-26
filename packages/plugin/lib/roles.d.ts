@@ -5,6 +5,8 @@ export interface CodeAgentRole {
   reasoningEffort?: string
   instructions?: string
   allowDelegation: boolean
+  backgroundOnly: boolean
+  executionPermission?: 'read-only' | 'workspace-write' | 'danger-full-access'
 }
 
 export function normalizeRole(raw: Record<string, unknown>): Readonly<CodeAgentRole>
@@ -18,4 +20,6 @@ export function resolveRoleInvocation(
   model?: string
   reasoningEffort?: string
   prompt: string
+  backgroundOnly: boolean
+  executionPermission?: 'read-only' | 'workspace-write' | 'danger-full-access'
 }

@@ -24,6 +24,7 @@ import { approvalResponse, assertThreadStartResponse, assertTurnStartResponse, p
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000
 const DEFAULT_APP_SERVER_TURN_TIMEOUT_MS = 10 * 60_000
+const DEFAULT_APP_SERVER_CANCEL_TIMEOUT_MS = 30_000
 const MAX_LINE_BUFFER_BYTES = 4 * 1024 * 1024
 const MAX_PENDING_REQUESTS = 128
 
@@ -123,6 +124,15 @@ export class AppServerClient {
   isManaged(threadId) {
     const state = this._threads.get(threadId)
     return state !== undefined && state.managed === true
+  }
+
+  activeTurnForThread(threadId) {
+    const turnId = this._threads.get(threadId)?.activeTurnId
+    return typeof turnId === 'string' ? turnId : undefined
+  }
+
+  managedThreadIds() {
+    return [...this._ownedThreads]
   }
 
   async ensureStarted() {
@@ -367,7 +377,8 @@ export class AppServerClient {
     const waiter = this._turnWaiters.get(turnId)
     if (waiter !== undefined) {
       this._turnWaiters.delete(turnId)
-      clearTimeout(waiter.timer)
+      if (waiter.timer !== undefined) clearTimeout(waiter.timer)
+      waiter.signal?.removeEventListener?.('abort', waiter.onAbort)
       waiter.resolve(completion)
     } else {
       this._turnCompletions.set(turnId, completion)
@@ -375,7 +386,7 @@ export class AppServerClient {
     }
   }
 
-  waitForTurn(turnId, { timeoutMs = this._requestTimeoutMs } = {}) {
+  waitForTurn(turnId, { timeoutMs = this._requestTimeoutMs, signal } = {}) {
     if (typeof turnId !== 'string' || !this._ownedTurns.has(turnId) && !this._turnCompletions.has(turnId)) {
       return Promise.reject(new AppServerError(-32602, 'waitForTurn: unknown or unowned turn'))
     }
@@ -384,14 +395,35 @@ export class AppServerClient {
       this._turnCompletions.delete(turnId)
       return Promise.resolve(completed)
     }
+    if (signal?.aborted) {
+      const error = new AppServerError(-32800, 'app-server turn wait was aborted')
+      error.outcomeUnknown = true
+      error.aborted = true
+      return Promise.reject(error)
+    }
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
+      const finishReject = (error) => {
         if (!this._turnWaiters.delete(turnId)) return
-        const error = new AppServerError(-32001, `app-server turn timed out: ${turnId}`)
-        error.outcomeUnknown = true
+        if (timer !== undefined) clearTimeout(timer)
+        signal?.removeEventListener?.('abort', onAbort)
         reject(error)
-      }, timeoutMs)
-      this._turnWaiters.set(turnId, { resolve, reject, timer })
+      }
+      const onAbort = () => {
+        const error = new AppServerError(-32800, 'app-server turn wait was aborted')
+        error.outcomeUnknown = true
+        error.aborted = true
+        finishReject(error)
+      }
+      const timer = timeoutMs === undefined || timeoutMs === null
+        ? undefined
+        : setTimeout(() => {
+            const error = new AppServerError(-32001, `app-server turn timed out: ${turnId}`)
+            error.outcomeUnknown = true
+            finishReject(error)
+          }, timeoutMs)
+      timer?.unref?.()
+      signal?.addEventListener?.('abort', onAbort, { once: true })
+      this._turnWaiters.set(turnId, { resolve, reject, timer, signal, onAbort })
     })
   }
 
@@ -405,7 +437,8 @@ export class AppServerClient {
     this._pending.clear()
     const turnError = new AppServerError(-32000, `app-server process exited (code ${code})`)
     for (const [turnId, waiter] of this._turnWaiters) {
-      clearTimeout(waiter.timer)
+      if (waiter.timer !== undefined) clearTimeout(waiter.timer)
+      waiter.signal?.removeEventListener?.('abort', waiter.onAbort)
       turnError.outcomeUnknown = true
       waiter.reject(turnError)
       this._turnWaiters.delete(turnId)
@@ -484,6 +517,10 @@ export class AppServerClient {
   }
 
   async threadResume(threadId, { model, executionPolicy } = {}) {
+    if (this.isManaged(threadId)) {
+      const state = this.threadState(threadId)
+      return { thread: { id: threadId, status: { type: state?.status ?? THREAD_STATUS.IDLE } }, reused: true }
+    }
     const params = { threadId, ...codexAppServerThreadPolicy(executionPolicy) }
     if (model !== undefined) params.model = model
     const result = await this.request('thread/resume', params)
@@ -506,12 +543,6 @@ export class AppServerClient {
     if (cwd !== undefined) params.cwd = cwd
     let result
     try { result = assertTurnStartResponse(await this.request('turn/start', params)) } catch (error) { throw new AppServerError(-32602, error.message) }
-    const turn = result.turn
-    if (typeof turn.id === 'string') {
-      this._ownedTurns.add(turn.id)
-      this._markManaged(threadId)
-      this._markTurnStarted(threadId, turn.id)
-    }
     return result
   }
 
@@ -526,6 +557,26 @@ export class AppServerClient {
       throw new AppServerError(-32602, 'turnSteer: refusing to steer a turn this channel did not start')
     }
     return this.request('turn/steer', { threadId, input, expectedTurnId })
+  }
+
+  async turnInterrupt(threadId, turnId) {
+    if (typeof threadId !== 'string' || typeof turnId !== 'string') {
+      throw new AppServerError(-32602, 'turnInterrupt: threadId and turnId are required')
+    }
+    if (!this._ownedTurns.has(turnId)) {
+      throw new AppServerError(-32602, 'turnInterrupt: refusing to interrupt a turn this channel did not start')
+    }
+    return this.request('turn/interrupt', { threadId, turnId })
+  }
+
+  async threadUnsubscribe(threadId) {
+    if (typeof threadId !== 'string' || threadId.length === 0) {
+      throw new AppServerError(-32602, 'threadUnsubscribe: threadId is required')
+    }
+    const result = await this.request('thread/unsubscribe', { threadId })
+    this._ownedThreads.delete(threadId)
+    this._threads.delete(threadId)
+    return result
   }
 
   async dispose() {
@@ -545,7 +596,8 @@ export class AppServerClient {
     const errorForTurns = new AppServerError(-32000, 'app-server client disposed')
     errorForTurns.outcomeUnknown = true
     for (const [turnId, waiter] of this._turnWaiters) {
-      clearTimeout(waiter.timer)
+      if (waiter.timer !== undefined) clearTimeout(waiter.timer)
+      waiter.signal?.removeEventListener?.('abort', waiter.onAbort)
       waiter.reject(errorForTurns)
       this._turnWaiters.delete(turnId)
     }
@@ -627,6 +679,7 @@ export function createCodexAppServerChannel(options = {}) {
     logger: options.logger,
   }
   const clients = new Map()
+  const threadOperations = new Map()
 
   const base = {
     id: 'codex',
@@ -638,7 +691,8 @@ export function createCodexAppServerChannel(options = {}) {
 
   function clientKey(policy) {
     if (!policy) return 'unscoped'
-    return [policy.sourceSessionId ?? '', policy.targetSessionId ?? '', policy.permission ?? '', policy.workspaceRoot ?? ''].join('\u0000')
+    const approvalClass = policy.permission === 'workspace-write' ? 'target-approval' : 'no-approval'
+    return [policy.targetSessionId ?? '', policy.workspaceRoot ?? '', approvalClass].join('\u0000')
   }
 
   async function getClient(env, policy = null) {
@@ -687,6 +741,62 @@ export function createCodexAppServerChannel(options = {}) {
     return undefined
   }
 
+  async function retireClient(client) {
+    for (const [key, candidate] of clients) {
+      if (candidate === client) clients.delete(key)
+    }
+    await client.dispose().catch(() => {})
+  }
+
+  async function withThreadOperation(threadId, operation) {
+    if (typeof threadId !== 'string' || threadId.length === 0) return operation()
+    const previous = threadOperations.get(threadId) ?? Promise.resolve()
+    let release
+    const current = new Promise((resolve) => { release = resolve })
+    threadOperations.set(threadId, current)
+    await previous.catch(() => {})
+    try {
+      return await operation()
+    } finally {
+      release()
+      if (threadOperations.get(threadId) === current) threadOperations.delete(threadId)
+    }
+  }
+
+  async function interruptAfterUnknown(client, threadId, turnId, cause) {
+    let completion
+    let interruptError
+    try {
+      await client.turnInterrupt(threadId, turnId)
+      completion = await client.waitForTurn(turnId, { timeoutMs: options.appServerCancelTimeoutMs ?? DEFAULT_APP_SERVER_CANCEL_TIMEOUT_MS })
+    } catch (error) {
+      interruptError = error
+    }
+    if (completion !== undefined) {
+      return {
+        channel: 'codex',
+        runId: `codex-${Date.now().toString(36)}`,
+        sessionId: threadId,
+        turnId,
+        stopReason: cause?.aborted ? 'aborted' : 'error',
+        output: typeof completion.output === 'string' ? completion.output : '',
+        outcomeUnknown: false,
+        capabilities: base.capabilities,
+      }
+    }
+    await retireClient(client)
+    return {
+      channel: 'codex',
+      runId: `codex-${Date.now().toString(36)}`,
+      sessionId: threadId,
+      turnId,
+      stopReason: cause?.aborted ? 'aborted' : 'error',
+      output: `Codex turn outcome is unknown after cancellation; the owned app-server was stopped (${String(interruptError?.message ?? cause?.message ?? 'unknown error')})`,
+      outcomeUnknown: true,
+      capabilities: base.capabilities,
+    }
+  }
+
   async function runAppServerTurn(request, env, resumeSessionId) {
     const cwd = request.cwd ?? request.parentCwd ?? env.cwd
     let policy
@@ -700,46 +810,102 @@ export function createCodexAppServerChannel(options = {}) {
       return unsupportedPermissionPolicy('codex', policy, base.capabilities, 'Codex app-server bridge requires Workspace Write target-session approval')
     }
     if (typeof request.prompt !== 'string' || request.prompt.trim() === '') throw new Error('channel-codex: prompt is required')
-    const client = await getClient(env, policy)
-    const model = request.model ?? request.codexOptions?.model ?? request.agentOptions?.model
-    const effort = request.reasoningEffort ?? request.codexOptions?.reasoningEffort
-    const started = resumeSessionId === undefined
-      ? await client.threadStart({ cwd, model, executionPolicy: policy })
-      : await client.threadResume(resumeSessionId, { model, executionPolicy: policy })
-    const threadId = resumeSessionId ?? started?.thread?.id
-    if (typeof threadId !== 'string' || threadId.length === 0) throw new Error('Codex app-server returned no thread id')
-    const turn = await client.turnStart({
-      threadId,
-      input: [{ type: 'text', text: request.prompt }],
-      ...(model === undefined ? {} : { model }),
-      ...(effort === undefined ? {} : { effort }),
-      ...(cwd === undefined ? {} : { cwd }),
-      executionPolicy: policy,
-    })
-    const turnId = turn?.turn?.id
-    if (typeof turnId !== 'string') throw new Error('Codex app-server returned no turn id')
-    const completion = await client.waitForTurn(turnId, { timeoutMs: options.appServerTurnTimeoutMs ?? DEFAULT_APP_SERVER_TURN_TIMEOUT_MS })
-    const output = typeof completion.output === 'string' ? completion.output : ''
-    if (completion.status !== 'completed') {
+    if (typeof resumeSessionId === 'string' && threadOperations.has(resumeSessionId)) {
+      const owner = findClientForThread(resumeSessionId)
+      return {
+        channel: 'codex',
+        runId: `codex-${Date.now().toString(36)}`,
+        sessionId: resumeSessionId,
+        turnId: owner?.activeTurnForThread(resumeSessionId),
+        stopReason: 'error',
+        output: `Codex thread ${resumeSessionId} already has an in-flight managed operation`,
+        delivery: 'active_managed',
+        mayBeConcurrent: false,
+        capabilities: base.capabilities,
+      }
+    }
+    return withThreadOperation(resumeSessionId, async () => {
+      const client = resumeSessionId === undefined
+        ? await getClient(env, policy)
+        : findClientForThread(resumeSessionId) ?? await getClient(env, policy)
+      const model = request.model ?? request.codexOptions?.model ?? request.agentOptions?.model
+      const effort = request.reasoningEffort ?? request.codexOptions?.reasoningEffort
+      let started
+      if (resumeSessionId === undefined) {
+        started = await client.threadStart({ cwd, model, executionPolicy: policy })
+      } else if (!client.isManaged(resumeSessionId)) {
+        try {
+          started = await client.threadResume(resumeSessionId, { model, executionPolicy: policy })
+        } catch (error) {
+          if (/active writer|thread-store conflict/iu.test(String(error?.message ?? error))) {
+            await retireClient(client)
+            return {
+              channel: 'codex',
+              runId: `codex-${Date.now().toString(36)}`,
+              sessionId: resumeSessionId,
+              stopReason: 'error',
+              output: `Codex thread ${resumeSessionId} is owned by another live writer; no retry or lock deletion was attempted`,
+              delivery: 'external_or_idle',
+              errorCode: 'CODEX_THREAD_EXTERNALLY_OWNED',
+              outcomeUnknown: true,
+              capabilities: base.capabilities,
+            }
+          }
+          throw error
+        }
+      } else {
+        const state = client.threadState(resumeSessionId)
+        if (state?.status === THREAD_STATUS.ACTIVE || client.activeTurnForThread(resumeSessionId)) {
+          return {
+            channel: 'codex',
+            runId: `codex-${Date.now().toString(36)}`,
+            sessionId: resumeSessionId,
+            turnId: client.activeTurnForThread(resumeSessionId),
+            stopReason: 'error',
+            output: `Codex thread ${resumeSessionId} already has an active managed turn`,
+            delivery: 'active_managed',
+            capabilities: base.capabilities,
+          }
+        }
+        started = { thread: { id: resumeSessionId, status: { type: state?.status ?? THREAD_STATUS.IDLE } }, reused: true }
+      }
+      const threadId = resumeSessionId ?? started?.thread?.id
+      if (typeof threadId !== 'string' || threadId.length === 0) throw new Error('Codex app-server returned no thread id')
+      const turn = await client.turnStart({
+        threadId,
+        input: [{ type: 'text', text: request.prompt }],
+        ...(model === undefined ? {} : { model }),
+        ...(effort === undefined ? {} : { effort }),
+        ...(cwd === undefined ? {} : { cwd }),
+        executionPolicy: policy,
+      })
+      const turnId = turn?.turn?.id
+      if (typeof turnId !== 'string') throw new Error('Codex app-server returned no turn id')
+      env.onBinding?.({ sessionId: threadId, turnId })
+      const timeoutMs = request.background === true
+        ? options.appServerBackgroundTurnTimeoutMs ?? null
+        : options.appServerTurnTimeoutMs ?? DEFAULT_APP_SERVER_TURN_TIMEOUT_MS
+      let completion
+      try {
+        completion = await client.waitForTurn(turnId, { timeoutMs, signal: env.signal })
+      } catch (error) {
+        if (error?.outcomeUnknown === true || env.signal?.aborted) {
+          return interruptAfterUnknown(client, threadId, turnId, error)
+        }
+        throw error
+      }
+      const output = typeof completion.output === 'string' ? completion.output : ''
       return {
         channel: 'codex',
         runId: `codex-${Date.now().toString(36)}`,
         sessionId: threadId,
         turnId,
-        stopReason: completion.status === 'interrupted' ? 'aborted' : 'error',
+        stopReason: completion.status === 'completed' ? 'completed' : completion.status === 'interrupted' ? 'aborted' : 'error',
         output,
+        outcomeUnknown: false,
         capabilities: base.capabilities,
       }
-    }
-    return {
-      channel: 'codex',
-      runId: `codex-${Date.now().toString(36)}`,
-      sessionId: threadId,
-      turnId,
-      stopReason: 'completed',
-      output,
-      capabilities: base.capabilities,
-    }
+    })
   }
 
   return {
@@ -1011,8 +1177,21 @@ export function createCodexAppServerChannel(options = {}) {
       }
     },
     async dispose() {
-      await Promise.allSettled([...clients.values()].map((client) => client.dispose()))
+      await Promise.allSettled([...clients.values()].map(async (client) => {
+        for (const threadId of client.managedThreadIds()) {
+          const turnId = client.activeTurnForThread(threadId)
+          if (turnId !== undefined) {
+            try {
+              await client.turnInterrupt(threadId, turnId)
+              await client.waitForTurn(turnId, { timeoutMs: 5_000 })
+            } catch {}
+          }
+          try { await client.threadUnsubscribe(threadId) } catch {}
+        }
+        await client.dispose()
+      }))
       clients.clear()
+      threadOperations.clear()
     },
   }
 }

@@ -32,6 +32,7 @@ export interface ChannelResult {
     | 'refused'
     | 'failed'
   mayBeConcurrent?: boolean
+  outcomeUnknown?: boolean
   capabilities: ChannelCapabilities
   errorCode?: string
 }
@@ -52,6 +53,7 @@ export interface RunEnv {
   signal?: AbortSignal
   /** Best-effort observation only; ChannelResult remains the authoritative final value. */
   onUpdate?: (update: ChannelUpdate) => void
+  onBinding?: (binding: { sessionId?: string; turnId?: string }) => void
   cwd?: string
   /** Temp directory override (channels default to os.tmpdir()). */
   tmpdir?: string
@@ -69,6 +71,7 @@ export interface RunRequest {
   parentCwd?: string
   /** Background job id when run via the jobs service. */
   background?: boolean
+  onBinding?: (binding: { sessionId?: string; turnId?: string }) => void
   executionPolicy?: ChannelExecutionPolicy
   runtimeRequirement?: RuntimeRequirement
 }
