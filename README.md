@@ -262,6 +262,8 @@ ACP 实例按需追加；`id`/`name` 只写实例名，注册后是 `acp/<name>`
 
 权限策略不再固定 bypass：只有目标 Session 为 Full Access 时 Codex 才使用 `--dangerously-bypass-approvals-and-sandbox` 或 app-server `dangerFullAccess`；Read Only 使用官方受限 CLI，Workspace Write 必须走按 target Session 隔离的 Codex app-server approval bridge，不能用没有 server-request bridge 的 `codex exec` 冒充支持；无法兑现时显式拒绝。角色可以请求相对目标 Session 的权限降级，但不能提权。前台 app-server turn 使用独立的 `appServerTurnTimeoutMs`；后台 turn 没有固定十分钟上限，由拥有者取消、插件卸载或 Codex 终态结束。取消最多等待 `appServerCancelTimeoutMs`，仍无法证明终态时返回 `outcomeUnknown` 并退役该精确 app-server。插件不会重试外部 writer 冲突，也不会删除 Codex `thread-writer-locks`。
 
+Codex 0.147.0 的 `exec resume` 不接受父命令的 `--sandbox` 参数；受限续接使用该子命令正式支持的 `-c sandbox_mode=...` 与 `-c approval_policy=...`，并把所有选项放在 sessionId/prompt 之前。Read Only 顾问因此可安全续接而不会退回 Full Access。
+
 ## 扩展渠道
 
 若目标已经提供 ACP server，只需新增一行 `channel: acp` 配置，可并存多个实例，不修改代码。只有需要原生专属能力（例如 Codex app-server 的会话列表和真 steer）时才新增渠道包：

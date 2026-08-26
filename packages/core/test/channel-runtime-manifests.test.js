@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url'
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..')
 const channels = ['channel-codex', 'channel-claude-code', 'channel-grok-build', 'channel-acp']
 const expectedVersions = new Map([
-  ['channel-codex', '0.1.4'],
+  ['channel-codex', '0.1.5'],
   ['channel-claude-code', '0.1.3'],
   ['channel-grok-build', '0.1.3'],
   ['channel-acp', '0.1.3'],

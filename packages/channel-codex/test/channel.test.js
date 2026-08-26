@@ -7,6 +7,7 @@ import {
   codexExecArgv,
   codexExecResumeArgv,
   codexExecutionPolicyArgv,
+  codexResumeExecutionPolicyArgv,
   codexInvocationArgs,
   createCodexChannel,
   CODEX_FIXED_SANDBOX_ARGV,
@@ -76,6 +77,15 @@ test('codex restricted policies never emit Full Access bypass', () => {
   assert.equal(workspaceWrite.includes(BYPASS), false)
 })
 
+test('codex resume restricted policies use supported config overrides, never exec-only --sandbox', () => {
+  const readOnly = codexResumeExecutionPolicyArgv({ permission: 'read-only' })
+  const workspaceWrite = codexResumeExecutionPolicyArgv({ permission: 'workspace-write' })
+  assert.deepEqual(readOnly, ['-c', 'sandbox_mode="read-only"', '-c', 'approval_policy="on-request"'])
+  assert.deepEqual(workspaceWrite, ['-c', 'sandbox_mode="workspace-write"', '-c', 'approval_policy="on-request"'])
+  assert.equal(readOnly.includes('--sandbox'), false)
+  assert.equal(readOnly.includes(BYPASS), false)
+})
+
 test('codex argv supports per-call model and effort', () => {
   const argv = codexExecArgv({
     node: 'node',
@@ -124,13 +134,13 @@ test('codex resume argv uses resume subcommand, stdin prompt, fixed bypass', () 
     'codex.js',
     'exec',
     'resume',
-    'thr_abc',
-    '-',
     '--json',
     '--skip-git-repo-check',
     '-m',
     'gpt-5.6-sol',
     BYPASS,
+    'thr_abc',
+    '-',
   ])
   assert.throws(
     () => codexExecResumeArgv({ node: 'node', js: 'codex.js', sessionId: '', request: {}, executionPolicy: FULL_ACCESS_POLICY }),
@@ -305,6 +315,7 @@ test('run with resumeSessionId builds resume argv and forwards stdin', async () 
   assert.equal(result.stopReason, 'completed')
   assert.ok(spawned.argv.includes('resume'))
   assert.ok(spawned.argv.includes('thr_9'))
+  assert.equal(spawned.argv.includes('--sandbox'), false)
   assert.equal(result.delivery, 'resume_unmanaged')
   assert.equal(result.mayBeConcurrent, true)
 })
