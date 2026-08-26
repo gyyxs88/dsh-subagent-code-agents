@@ -21,6 +21,9 @@ test('installed CLI parameter smoke uses current Codex/Grok/Claude help only', {
   const codex = run(process.env.CODEX_BIN ?? 'codex', ['exec', '--sandbox', 'read-only', '-c', 'approval_policy="on-request"', '--help'])
   assert.equal(codex.error, undefined, codex.error?.message)
   assert.equal(codex.status, 0, codex.stderr)
+  const codexResume = run(process.env.CODEX_BIN ?? 'codex', ['exec', 'resume', '--json', '--skip-git-repo-check', '-c', 'sandbox_mode="read-only"', '-c', 'approval_policy="on-request"', '--help'])
+  assert.equal(codexResume.error, undefined, codexResume.error?.message)
+  assert.equal(codexResume.status, 0, codexResume.stderr)
   const oldCodex = run(process.env.CODEX_BIN ?? 'codex', ['exec', '--sandbox', 'read-only', '--ask-for-approval', 'on-request', '--help'])
   assert.notEqual(oldCodex.status, 0)
 

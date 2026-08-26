@@ -30,6 +30,17 @@ export function codexExecutionPolicyArgv(policy) {
   throw new Error(`${PREFIX}: unsupported permission policy ${policy.permission}`)
 }
 
+export function codexResumeExecutionPolicyArgv(policy) {
+  if (!policy || typeof policy.permission !== 'string') throw new Error(`${PREFIX}: execution policy is required`)
+  if (policy.permission === 'danger-full-access') return [...CODEX_FIXED_SANDBOX_ARGV]
+  // `codex exec resume` 0.147.0 does not expose the parent `exec --sandbox`
+  // flag. Its supported `-c key=value` option accepts the same official
+  // sandbox/approval configuration without widening the inherited policy.
+  if (policy.permission === 'read-only') return ['-c', 'sandbox_mode="read-only"', '-c', 'approval_policy="on-request"']
+  if (policy.permission === 'workspace-write') return ['-c', 'sandbox_mode="workspace-write"', '-c', 'approval_policy="on-request"']
+  throw new Error(`${PREFIX}: unsupported permission policy ${policy.permission}`)
+}
+
 const PREFIX = 'channel-codex'
 const WINDOWS_SHELL_SHIM_RE = /\.(?:cmd|ps1|bat)$/iu
 
@@ -89,8 +100,8 @@ export function codexExecResumeArgv({ argvPrefix, node, js, sessionId, request, 
     throw new Error(`${PREFIX}: resume requires a non-empty session id`)
   }
   return codexArgvPrefix({ argvPrefix, node, js })
-    .concat('exec', 'resume', sessionId, '-', '--json', '--skip-git-repo-check')
-    .concat(codexInvocationArgs(request), codexExecutionPolicyArgv(executionPolicy))
+    .concat('exec', 'resume', '--json', '--skip-git-repo-check')
+    .concat(codexInvocationArgs(request), codexResumeExecutionPolicyArgv(executionPolicy), sessionId, '-')
 }
 
 /**

@@ -11,6 +11,8 @@ export const CODEX_FIXED_SANDBOX_ARGV: readonly ['--dangerously-bypass-approvals
 export function normalizeModel(value: string | undefined): string | undefined
 export function normalizeReasoningEffort(value: string | undefined): string | undefined
 export function codexInvocationArgs(request: unknown): string[]
+export function codexExecutionPolicyArgv(policy: ChannelExecutionPolicy): string[]
+export function codexResumeExecutionPolicyArgv(policy: ChannelExecutionPolicy): string[]
 export function codexExecArgv(opts: { argvPrefix?: string[]; node?: string; js?: string; cwd: string; request: unknown; executionPolicy: ChannelExecutionPolicy }): string[]
 export function codexExecResumeArgv(opts: { argvPrefix?: string[]; node?: string; js?: string; sessionId: string; request: unknown; executionPolicy: ChannelExecutionPolicy }): string[]
 export function resolveCodexEntry(env: RunEnv, request?: unknown): Promise<{
