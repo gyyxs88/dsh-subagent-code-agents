@@ -86,6 +86,11 @@ const WORKSPACE_EXPECT = {
     'lib/roles.d.ts',
     'lib/owned-runs.js',
     'lib/owned-runs.d.ts',
+    'lib/run-notifier.js',
+    'lib/run-notifier.d.ts',
+    'lib/skill.js',
+    'lib/skill.d.ts',
+    'skills/dsh-code-agents/SKILL.md',
     'cordis.patch.yml',
     'README.md',
     'LICENSE',
@@ -102,6 +107,9 @@ const ROOT_EXPECT = [
   'package/packages/plugin/lib/auto-tool.d.ts',
   'package/packages/plugin/lib/roles.js',
   'package/packages/plugin/lib/owned-runs.js',
+  'package/packages/plugin/lib/run-notifier.js',
+  'package/packages/plugin/lib/skill.js',
+  'package/packages/plugin/skills/dsh-code-agents/SKILL.md',
   'package/packages/plugin/cordis.patch.yml',
   'package/README.md',
   'package/LICENSE',
@@ -216,6 +224,9 @@ function checkRootTarball() {
     const peerPaths = {
       '@deepseek-ai/dsh-tools': path.join(root, 'node_modules', '@deepseek-ai', 'dsh-tools'),
       '@deepseek-ai/dsh-subagent': path.join(root, 'node_modules', '@deepseek-ai', 'dsh-subagent'),
+      '@deepseek-ai/dsh-llm': path.join(root, '..', 'node_modules', '@deepseek-ai', 'dsh-llm'),
+      '@deepseek-ai/dsh-skill': path.join(root, '..', 'node_modules', '@deepseek-ai', 'dsh-skill'),
+      '@deepseek-ai/dsh-system-prompt': path.join(root, '..', 'node_modules', '@deepseek-ai', 'dsh-system-prompt'),
       '@deepseek-ai/cordis': path.join(root, 'node_modules', '@deepseek-ai', 'cordis'),
       '@deepseek-ai/schemastery': path.join(root, 'node_modules', '@deepseek-ai', 'schemastery'),
     }
@@ -247,9 +258,11 @@ function checkRootTarball() {
         const a = await import('dsh-subagent-code-agents');
         const b = await import('dsh-subagent-code-agents/tool');
         const c = await import('dsh-subagent-code-agents/auto-tool');
+        const d = await import('dsh-subagent-code-agents/skill');
         console.log('root export apply:', typeof a.apply);
         console.log('tool export apply:', typeof b.apply);
         console.log('auto-tool export apply:', typeof c.apply);
+        console.log('skill export apply:', typeof d.apply);
       `,
     )
     const verify = runInherit([process.execPath, verifyFile], { cwd: consumer })
@@ -258,7 +271,7 @@ function checkRootTarball() {
       console.error('✖ consumer import failed')
       return
     }
-    console.log('✔ consumer imports dsh-subagent-code-agents, /tool and /auto-tool OK')
+    console.log('✔ consumer imports dsh-subagent-code-agents, /tool, /auto-tool and /skill OK')
 
     // Verify the bundled internal deps physically exist. bundleDependencies
     // are placed under the root package's own node_modules (nested), so check

@@ -194,6 +194,9 @@ test('auto-mounted subagent_code uses the host-injected service across agent iso
       list: () => [...agents],
       get: (id) => agents.find((agent) => agent.id === id),
     }),
+    ctx.provide('sessions', {
+      async flush() {},
+    }),
     ctx.provide('agentPresets', {
       composedPreset: () => 'standard',
     }),

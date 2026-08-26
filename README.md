@@ -1,6 +1,6 @@
 # dsh-subagent-code-agents
 
-DeepSeek Harness（DSH）`0.1.0-rc.6` 至 `0.1.1-rc.2` 的多渠道编码代理子代理插件：内置 OpenAI Codex、Anthropic Claude Code、Grok Build，并可配置任意数量的 Agent Client Protocol（ACP）实例。它同时提供严格角色、插件自有后台运行登记和诚实的重启后续跑语义；旧 `dsh-subagent-codex` 可原样共存。
+DeepSeek Harness（DSH）`0.1.0-rc.6` 至 `0.1.1-rc.2` 的多渠道编码代理子代理插件：内置 OpenAI Codex、Anthropic Claude Code、Grok Build，并可配置任意数量的 Agent Client Protocol（ACP）实例。它同时提供严格角色、插件自有后台运行登记、持久终态自动回报和诚实的重启后续跑语义；旧 `dsh-subagent-codex` 可原样共存。
 
 ## 远程项目与运行时部署
 
@@ -79,7 +79,7 @@ packages/
 
 ## 工具接口
 
-- **`subagent_code`** — 必填 `description` / `prompt`，并提供 `channel` 或已配置的 `role`；可选 `model` / `reasoning_effort` / `resume_session_id` / `run_in_background`。显式模型与强度覆盖角色默认值；模型必须使用渠道接受的完整 ID（Codex 例如 `gpt-5.6-sol`，不要写成 `sol`）；角色/通道冲突、未知角色和能力缺口都显式拒绝。
+- **`subagent_code`** — 必填 `description` / `prompt`，并提供 `channel` 或已配置的 `role`；可选 `model` / `reasoning_effort` / `resume_session_id` / `run_in_background` / `completion_delivery`。长期任务使用 `run_in_background=true` 后立即返回，默认 `completion_delivery=followup`：终态消息持久写入并自动唤醒拥有者会话，不再要求 `job_output` 轮询；显式轮询流程可选 `manual`。显式模型与强度覆盖角色默认值；模型必须使用渠道接受的完整 ID（Codex 例如 `gpt-5.6-sol`，不要写成 `sol`）；角色/通道冲突、未知角色和能力缺口都显式拒绝。
 - **`coding_sessions_list`** — 必填 `channel`；默认按调用者 cwd 过滤，`include_all:true` 显式跨项目；`limit` 1..100。
 - **`coding_session_read`** — 必填 `channel` + `session_id`；`max_turns` 1..20。
 - **`coding_session_start`** — 必填 `channel` + `prompt`；可选 `model` / `reasoning_effort` / `cwd`，模型同样必须使用完整渠道 ID。
@@ -110,7 +110,9 @@ packages/
 
 ### 插件自有运行与重启
 
-后台运行登记默认写到 `<DSH_HOME>/dsh-subagent-code-agents/owned-runs.json`；也可用 `runRegistryPath` 指定位置。若两者都没有，则只在内存中登记。只保存通道、角色、模型、强度、cwd、sessionId、状态和最多 1000 字符输出摘要；**不保存 prompt、密钥或登录态**。
+后台运行登记默认写到 `<DSH_HOME>/dsh-subagent-code-agents/owned-runs.json`；也可用 `runRegistryPath` 指定位置。若两者都没有，则只在内存中登记。只保存拥有者 ID、通道、角色、模型、强度、cwd、sessionId、状态、最多 1000 字符输出摘要，以及终态通知的稳定消息 ID/摘要/投递状态；**不保存 prompt、密钥或登录态**。插件重启把未结算运行标为 `interrupted`，拥有者会话重新挂载后收到一次可去重回报，绝不冒充旧进程仍存活。
+
+bundle 还注册 `dsh-code-agents` Skill，要求 Agent 对长期任务默认后台派发后结束当前轮，并在插件自动回报后再验收；前台等待和 `completion_delivery=manual` 只用于真正的同轮依赖或显式审计。
 
 进程重启时，磁盘上所有 `running` 记录都会转换为 `interrupted`，绝不伪装为仍在运行。仅当记录含 sessionId 且当前通道支持 resume 时，`continuation` 才为 `resume_available`；否则为 `unavailable`。
 
@@ -142,7 +144,7 @@ npm pack
 // <profile>/package.json
 {
   "dependencies": {
-    "dsh-subagent-code-agents": "file:D:/path/to/dsh-subagent-code-agents-0.1.3.tgz"
+    "dsh-subagent-code-agents": "file:D:/path/to/dsh-subagent-code-agents-0.1.4.tgz"
   },
   "dsh": {
     "profile": {

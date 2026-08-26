@@ -9,5 +9,10 @@ export const Config: import('@deepseek-ai/schemastery').Schemastery<any, any>
 export function apply(
   ctx: Record<string, any>,
   config?: Record<string, unknown>,
-  injected?: { subagents?: { start(name: string, request: Record<string, unknown>): Promise<any> } },
+  injected?: {
+    agents?: { get(id: string): any }
+    ownerAgent?: any
+    sessions?: { flush(session: any): Promise<void> }
+    subagents?: { start(name: string, request: Record<string, unknown>): Promise<any> }
+  },
 ): () => Promise<void>

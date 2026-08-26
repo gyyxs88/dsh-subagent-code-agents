@@ -15,9 +15,10 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { TRUSTED_EXECUTION_POLICY, hasCapability, normalizeExecutionPolicy, registry, unsupported } from '@dsh-subagent-code-agents/core'
 import { loadRoleRegistry, resolveRoleInvocation } from './roles.js'
 import { defaultRunRegistryPath, jobOutcomeFor, OwnedRunRegistry, sharedOwnedRunRegistry } from './owned-runs.js'
+import { createRunNotifier } from './run-notifier.js'
 
 export const name = 'tool-subagent-code-agents'
-export const inject = ['tools', 'subagents']
+export const inject = ['agents', 'sessions', 'tools', 'subagents']
 
 export const toolNames = Object.freeze([
   'subagent_code',
@@ -56,7 +57,10 @@ function outputValueText(values) {
     .join('')
 }
 
-async function settleOwnedStart(start, signal, ownedRuns, runId) {
+async function settleOwnedStart(start, signal, ownedRuns, runId, onSettled) {
+  const notify = async () => {
+    try { await onSettled?.() } catch {}
+  }
   let run
   try {
     run = await start
@@ -65,13 +69,16 @@ async function settleOwnedStart(start, signal, ownedRuns, runId) {
       await run.dispose()
     } catch (error) {
       ownedRuns.fail(runId, `dispose failed: ${String(error)}`, signal.aborted)
+      await notify()
       return { status: 'failed', detail: `dispose failed: ${String(error)}` }
     }
     ownedRuns.settle(runId, result)
+    await notify()
     return jobOutcomeFor(result)
   } catch (error) {
     try { await run?.dispose?.() } catch {}
     ownedRuns.fail(runId, error, signal.aborted)
+    await notify()
     return signal.aborted ? { status: 'killed' } : { status: 'failed', detail: String(error) }
   }
 }
@@ -177,6 +184,10 @@ export const apply = (ctx, config = {}, injected = {}) => {
     filePath: runRegistryPath,
     logger: ctx.logger,
   }) : new OwnedRunRegistry({ logger: ctx.logger })
+  const agents = injected.agents ?? ctx.get?.('agents')
+  const sessions = injected.sessions ?? ctx.get?.('sessions')
+  const runNotifier = createRunNotifier({ ownedRuns, agents, sessions, logger: ctx.logger })
+  const ownerAgent = injected.ownerAgent
   const ownedRunIds = new Set()
   const disposers = []
 
@@ -200,10 +211,16 @@ export const apply = (ctx, config = {}, injected = {}) => {
     reasoningEffort,
     sessionId,
     resumedFrom,
+    completionDelivery = 'followup',
   }) => {
+    if (!['followup', 'manual'].includes(completionDelivery)) {
+      throw new Error('completion_delivery must be followup or manual')
+    }
     const record = ownedRuns.create({
       channel: channel.id,
       label,
+      ownerId: owner.id,
+      completionDelivery,
       role,
       cwd: request.cwd,
       model,
@@ -227,6 +244,7 @@ export const apply = (ctx, config = {}, injected = {}) => {
             controller.signal,
             ownedRuns,
             record.id,
+            () => runNotifier.request(record.id, owner),
           ),
         }),
       })
@@ -235,7 +253,7 @@ export const apply = (ctx, config = {}, injected = {}) => {
       throw error
     }
     ownedRuns.setJobId(record.id, jobId)
-    return { kind: 'background', jobId, runId: record.id }
+    return { kind: 'background', jobId, runId: record.id, completionDelivery }
   }
 
   const mountSubagentCode = () => {
@@ -246,7 +264,7 @@ export const apply = (ctx, config = {}, injected = {}) => {
           description:
             'Delegate a self-contained coding task to a registered coding-agent channel. Supply channel directly, or a configured role that fixes the channel and may provide model/effort/instructions. Explicit model/reasoning_effort override role defaults; a role/channel mismatch is rejected.' +
             (backgroundEnabled
-              ? ' Set run_in_background to return a job id; collect with job_output and stop with job_kill.'
+              ? ' For autonomous or long work, set run_in_background=true: the call returns immediately and a durable terminal report automatically wakes the owner; use job_output only for explicit same-turn inspection.'
               : ' The call waits for the result.'),
           parameters: {
             channel: {
@@ -283,7 +301,12 @@ export const apply = (ctx, config = {}, injected = {}) => {
               ? {
                   run_in_background: {
                     type: 'boolean',
-                    description: 'Whether to run as a background job and return its id.',
+                    description: 'Whether to run as a background job and return immediately.',
+                  },
+                  completion_delivery: {
+                    type: 'string',
+                    enum: ['followup', 'manual'],
+                    description: 'Background terminal report mode; defaults to followup. manual is only for explicit polling workflows.',
                   },
                 }
               : {}),
@@ -348,7 +371,11 @@ export const apply = (ctx, config = {}, injected = {}) => {
                 model: invocation.model,
                 reasoningEffort: invocation.reasoningEffort,
                 sessionId: args.resume_session_id,
+                completionDelivery: args.completion_delivery ?? 'followup',
               })
+            }
+            if (args.completion_delivery !== undefined) {
+              throw new Error('completion_delivery requires run_in_background=true')
             }
             const run = await subagents.start(providerName, { ...request, signal: exec.signal })
             return settleForegroundRun(run)
@@ -504,8 +531,9 @@ export const apply = (ctx, config = {}, injected = {}) => {
           status: { type: 'string', description: 'Optional status filter: running | settled | interrupted.' },
           limit: { type: 'number', description: 'Maximum rows (default 50, max 100).' },
         },
-        execute(args) {
+        execute(args, exec) {
           return ownedRuns.list({
+            ownerId: exec.agent.id,
             channel: args.channel,
             status: args.status,
             limit: clampInt(args.limit, 1, 100, 50),
@@ -518,9 +546,9 @@ export const apply = (ctx, config = {}, injected = {}) => {
         parameters: {
           run_id: { type: 'string', required: true, description: 'Owned run id returned by subagent_code.' },
         },
-        execute(args) {
+        execute(args, exec) {
           const record = ownedRuns.read(args.run_id, registry)
-          if (!record) throw new Error(`unknown owned run "${args.run_id}"`)
+          if (!record || record.ownerId !== exec.agent.id) throw new Error(`unknown owned run "${args.run_id}"`)
           return record
         },
       },
@@ -533,10 +561,11 @@ export const apply = (ctx, config = {}, injected = {}) => {
           description: { type: 'string', description: 'Optional short job label.' },
           model: { type: 'string', description: 'Optional model override for this continuation.' },
           reasoning_effort: { type: 'string', description: 'Optional reasoning-effort override for this continuation.' },
+          completion_delivery: { type: 'string', enum: ['followup', 'manual'], description: 'Terminal report mode for the new background run; defaults to followup.' },
         },
         async execute(args, exec) {
           const previous = ownedRuns.read(args.run_id, registry)
-          if (!previous) throw new Error(`unknown owned run "${args.run_id}"`)
+          if (!previous || previous.ownerId !== exec.agent.id) throw new Error(`unknown owned run "${args.run_id}"`)
           if (previous.continuation !== 'resume_available') {
             return {
               accepted: false,
@@ -594,6 +623,7 @@ export const apply = (ctx, config = {}, injected = {}) => {
             reasoningEffort: invocation.reasoningEffort,
             sessionId: previous.sessionId,
             resumedFrom: previous.id,
+            completionDelivery: args.completion_delivery ?? 'followup',
           })
         },
       },
@@ -604,7 +634,9 @@ export const apply = (ctx, config = {}, injected = {}) => {
           run_id: { type: 'string', required: true, description: 'Owned run id.' },
           reason: { type: 'string', description: 'Optional cancellation reason.' },
         },
-        execute(args) {
+        execute(args, exec) {
+          const record = ownedRuns.read(args.run_id)
+          if (!record || record.ownerId !== exec.agent.id) throw new Error(`unknown owned run "${args.run_id}"`)
           return ownedRuns.cancel(args.run_id, args.reason)
         },
       },
@@ -636,6 +668,15 @@ export const apply = (ctx, config = {}, injected = {}) => {
   mountSubagentCode()
   mountSessionTools()
   mountRunTools()
+  if (ownerAgent?.id && typeof ctx.on === 'function') {
+    const stopSessionEvent = ctx.on('session/event', (session, event) => {
+      if (event.type === 'user/message' && session.id === ownerAgent.id) {
+        runNotifier.observeMessage(session, event.data)
+      }
+    })
+    if (typeof stopSessionEvent === 'function') disposers.push(stopSessionEvent)
+  }
+  if (ownerAgent?.id) queueMicrotask(() => runNotifier.requestOwner(ownerAgent))
   let disposal
   const dispose = () => disposal ??= (async () => {
     const fns = disposers.splice(0)
@@ -646,10 +687,9 @@ export const apply = (ctx, config = {}, injected = {}) => {
         return Promise.reject(error)
       }
     })
-    await Promise.allSettled([
-      ownedRuns.dispose(ownedRunIds),
-      ...toolDisposals,
-    ])
+    await ownedRuns.dispose(ownedRunIds)
+    await runNotifier.dispose()
+    await Promise.allSettled(toolDisposals)
   })()
   ctx.on('dispose', dispose)
   return dispose

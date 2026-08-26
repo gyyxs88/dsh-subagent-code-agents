@@ -23,6 +23,9 @@
 # Additional ACP instances are intentionally opt-in and must be added as
 # separate rows with `channel: acp`, `id`, `command` and optional `args`.
 - insert:
+    - id: coding-agent-skill
+      name: 'dsh-subagent-code-agents/skill'
+      config: {}
     - id: coding-agent-tools-auto
       name: 'dsh-subagent-code-agents/auto-tool'
       config:
