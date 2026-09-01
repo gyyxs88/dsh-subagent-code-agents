@@ -934,7 +934,10 @@ test('app-server channel steerActive on systemError is a hard failure', async ()
 test('app-server readSession enforces a global char budget across turns', async () => {
   const turns = Array.from({ length: 10 }, (_, i) => ({
     id: `turn_${i}`,
-    items: [{ type: 'userMessage', content: [{ type: 'text', text: 'X'.repeat(100) }] }],
+    items: [
+      { type: 'userMessage', content: [{ type: 'text', text: 'X'.repeat(100) }] },
+      ...(i === 9 ? [{ type: 'agentMessage', text: 'assistant progress only' }] : []),
+    ],
   }))
   const responder = (msg, handle) => {
     if (msg.method === 'initialize') {
@@ -968,6 +971,7 @@ test('app-server readSession enforces a global char budget across turns', async 
   assert.ok(total <= 250, `global budget exceeded: ${total}`)
   assert.equal(result.truncated, true)
   assert.equal(result.turns[result.turns.length - 1].id, 'turn_9')
+  assert.equal(result.lastAssistantText, 'assistant progress only')
 })
 
 test('app-server answers server-initiated requests with -32601 (never hangs)', async () => {

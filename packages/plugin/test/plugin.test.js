@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import { Context } from '@deepseek-ai/cordis'
+import { isJsonValue } from '@deepseek-ai/dsh-session'
 import { registry } from '@dsh-subagent-code-agents/core'
 import {
   Config,
@@ -358,11 +359,16 @@ test('providerFromChannel exposes bounded optional updates without changing fina
     },
   }
   const provider = providerFromChannel(fakeChannel, {})
-  const run = await provider.start({ prompt: [{ type: 'text', text: 'world' }] })
+  const observed = []
+  const run = await provider.start({
+    prompt: [{ type: 'text', text: 'world' }],
+    onUpdate(update) { observed.push(update) },
+  })
   const updates = []
   for await (const update of run.updates) updates.push(update)
   const result = await run.result
   assert.deepEqual(updates, [{ type: 'text-delta', text: 'hello world' }])
+  assert.deepEqual(observed, [{ type: 'text-delta', text: 'hello ' }, { type: 'text-delta', text: 'world' }])
   assert.equal(result.output[0].text, 'hello world')
 })
 
@@ -836,6 +842,100 @@ test('action-advisor role defaults to a background run with verified read-only p
   assert.equal(owner.inbox.nextTurn.length, 1)
   assert.match(owner.inbox.nextTurn[0].content[0].text, /PLAN complete/u)
   registry.unregister('advisor-role-channel')
+})
+
+test('background progress reaches job_output hooks and lossless coding_run_read before settlement', async () => {
+  const tasks = []
+  const jobs = {
+    start(spec) {
+      const task = spec.run()
+      tasks.push(task)
+      return 'job-progress'
+    },
+    wait() { return new Promise(() => {}) },
+  }
+  let finish
+  const result = new Promise((resolve) => { finish = resolve })
+  const { ctx, state } = makeCtx({
+    get(name) { return name === 'jobs' ? jobs : undefined },
+  })
+  ctx.subagents.start = async (_name, request) => {
+    request.onBinding?.({ sessionId: 'progress-session', turnId: 'progress-turn' })
+    request.onUpdate?.({ type: 'text-delta', text: 'checking migration assertions' })
+    return { id: 'progress-child', result, async dispose() {} }
+  }
+  registry.register({
+    id: 'progress-channel',
+    displayName: 'Progress',
+    capabilities: { run: true, resume: true, readSession: true },
+    async run() {},
+    async resume() {},
+    async readSession() { return { sessionId: 'progress-session', turns: [] } },
+  })
+  applyTool(ctx, {})
+  const owner = { id: 'owner-progress', session: { id: 'owner-progress', events: [] }, inbox: { nextTurn: [], nextStep: [] }, followup() {} }
+  const started = await state.registeredTools.get('subagent_code').execute(
+    { channel: 'progress-channel', description: 'track progress', prompt: 'work' },
+    { agent: owner, signal: new AbortController().signal },
+  )
+  assert.equal(tasks[0].readOutput(), 'checking migration assertions')
+  assert.equal(tasks[0].readOutput(), '')
+  const running = await state.registeredTools.get('coding_run_read').execute(
+    { run_id: started.runId },
+    { agent: owner },
+  )
+  assert.equal(running.status, 'running')
+  assert.equal(running.progress.phase, 'working')
+  assert.equal(running.progress.preview, 'checking migration assertions')
+  assert.equal(isJsonValue(running), true)
+  assert.equal(Object.hasOwn(running, 'notification'), false)
+  assert.equal(Object.hasOwn(running, 'ownerId'), false)
+  finish({ stopReason: 'completed', output: [{ type: 'text', text: 'done' }], sessionId: 'progress-session' })
+  assert.deepEqual(await tasks[0].done, { status: 'completed', output: 'done' })
+  assert.match(tasks[0].readOutput(), /\[final\]\ndone/u)
+  registry.unregister('progress-channel')
+})
+
+test('coding_run_read uses a bounded session snapshot only when no channel progress exists', async () => {
+  const tasks = []
+  const jobs = {
+    start(spec) { const task = spec.run(); tasks.push(task); return 'job-snapshot' },
+    wait() { return new Promise(() => {}) },
+  }
+  let finish
+  const result = new Promise((resolve) => { finish = resolve })
+  const { ctx, state } = makeCtx({ get(name) { return name === 'jobs' ? jobs : undefined } })
+  ctx.subagents.start = async (_name, request) => {
+    request.onBinding?.({ sessionId: 'snapshot-session' })
+    return { id: 'snapshot-child', result, async dispose() {} }
+  }
+  registry.register({
+    id: 'snapshot-channel',
+    displayName: 'Snapshot',
+    capabilities: { run: true, readSession: true },
+    async run() {},
+    async readSession() {
+      return { sessionId: 'snapshot-session', turns: [{ role: 'user', text: 'secret prompt' }, { role: 'assistant', text: 'reviewing repository state' }] }
+    },
+  })
+  applyTool(ctx, {})
+  const owner = { id: 'owner-snapshot', session: { id: 'owner-snapshot', events: [] }, inbox: { nextTurn: [], nextStep: [] }, followup() {} }
+  const started = await state.registeredTools.get('subagent_code').execute(
+    { channel: 'snapshot-channel', description: 'snapshot progress', prompt: 'secret prompt' },
+    { agent: owner, signal: new AbortController().signal },
+  )
+  const running = await state.registeredTools.get('coding_run_read').execute(
+    { run_id: started.runId },
+    { agent: owner },
+  )
+  assert.equal(running.progress.source, 'session-snapshot')
+  assert.equal(running.progress.preview, 'reviewing repository state')
+  assert.equal(running.progress.persisted, false)
+  assert.equal(JSON.stringify(running).includes('secret prompt'), false)
+  assert.equal(isJsonValue(running), true)
+  finish({ stopReason: 'completed', output: [{ type: 'text', text: 'done' }] })
+  await tasks[0].done
+  registry.unregister('snapshot-channel')
 })
 
 test('background owned run settles, remains inspectable, and resumes as a linked new run', async () => {

@@ -53,7 +53,7 @@ test('settled background run follows up its owner exactly once', async () => {
     assert.equal(owner.inbox.nextTurn[0].source.form, 'run-terminal-report')
     assert.match(owner.inbox.nextTurn[0].content[0].text, /final-acceptance-marker/u)
     assert.match(owner.inbox.nextTurn[0].content[0].text, /"turnId":"codex-turn"/u)
-    assert.equal(ownedRuns.read(record.id).notification.state, 'delivered')
+    assert.equal(ownedRuns.readInternal(record.id).notification.state, 'delivered')
 
     await notifier.request(record.id, owner)
     assert.equal(owner.inbox.nextTurn.length, 1)
@@ -97,13 +97,13 @@ test('flush uncertainty reuses the same run report identity', async () => {
   })
   ownedRuns.settle(record.id, { stopReason: 'completed', output: 'done' })
   await notifier.request(record.id, owner)
-  assert.equal(ownedRuns.read(record.id).notification.state, 'delivery-unknown')
+  assert.equal(ownedRuns.readInternal(record.id).notification.state, 'delivery-unknown')
   assert.equal(owner.inbox.nextTurn.length, 1)
   const messageId = owner.inbox.nextTurn[0].id
 
   flushError = undefined
   await notifier.request(record.id, owner)
-  assert.equal(ownedRuns.read(record.id).notification.state, 'delivered')
+  assert.equal(ownedRuns.readInternal(record.id).notification.state, 'delivered')
   assert.equal(owner.inbox.nextTurn.length, 1)
   assert.equal(owner.inbox.nextTurn[0].id, messageId)
   await notifier.dispose()

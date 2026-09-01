@@ -263,6 +263,7 @@ export function providerFromChannel(channel, env, providerName) {
         executionPolicy: request[TRUSTED_EXECUTION_POLICY] ?? env.executionPolicy,
         signal,
         onUpdate(update) {
+          try { request.onUpdate?.(update) } catch {}
           try { env.onUpdate?.(update) } catch {}
           updates.push(update)
         },

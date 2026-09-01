@@ -959,6 +959,17 @@ export function createCodexAppServerChannel(options = {}) {
       const thread = await client.threadRead(opts.sessionId, { includeTurns: true })
       const rawTurns = Array.isArray(thread.turns) ? thread.turns : []
       const candidateTurns = rawTurns.slice(-(opts.maxTurns ?? MAX_HISTORY_TURNS))
+      let lastAssistantText
+      for (let index = candidateTurns.length - 1; index >= 0 && lastAssistantText === undefined; index -= 1) {
+        const items = Array.isArray(candidateTurns[index]?.items) ? candidateTurns[index].items : []
+        for (let itemIndex = items.length - 1; itemIndex >= 0; itemIndex -= 1) {
+          const item = items[itemIndex]
+          if (item?.type === 'agentMessage' && typeof item.text === 'string' && item.text.trim()) {
+            lastAssistantText = item.text.trim().slice(-4_096)
+            break
+          }
+        }
+      }
       const budget = opts.maxChars ?? MAX_HISTORY_CHARS
       let used = 0
       let charTruncated = false
@@ -1014,6 +1025,7 @@ export function createCodexAppServerChannel(options = {}) {
         sessionId: thread.id,
         status: statusType,
         turns,
+        ...(lastAssistantText === undefined ? {} : { lastAssistantText }),
         truncated: rawTurns.length > (opts.maxTurns ?? MAX_HISTORY_TURNS) || charTruncated,
         chars: turns.reduce((sum, turn) => sum + turn.chars, 0),
         delivery: classifyThreadStatus(statusType, managed),

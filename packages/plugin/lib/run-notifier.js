@@ -34,6 +34,9 @@ function buildRunReport(record) {
       stopReason: cleanText(record.stopReason, 100) || null,
       outcomeUnknown: record.outcomeUnknown === true,
       outputSummary: cleanText(record.outputSummary, 16_000),
+      progressSummary: cleanText(record.progress?.preview, 4_096),
+      progressUpdatedAt: cleanText(record.progress?.updatedAt, 64) || null,
+      interruptionReason: cleanText(record.interruption?.reason, 100) || null,
       sessionId: cleanText(record.sessionId, 500) || null,
       turnId: cleanText(record.turnId, 500) || null,
       resumedFrom: cleanText(record.resumedFrom, 100) || null,
@@ -135,7 +138,7 @@ export function createRunNotifier({ ownedRuns, agents, sessions, logger = consol
 
   const deliver = async (runId, ownerHint) => {
     if (stopping) return
-    let record = ownedRuns.read(runId)
+    let record = ownedRuns.readInternal(runId)
     let report = buildRunReport(record)
     if (report === undefined) return
     let notification = record.notification

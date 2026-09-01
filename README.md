@@ -37,6 +37,7 @@ packages/
 | steerActive（真 steer） | ✅ | ❌ | ❌ | ❌ |
 | cancel API | ✅ | ✅ | ✅ | ✅² |
 | streaming 到 DSH | ❌ | ❌ | ❌ | ❌ |
+| 显式进度查询 | ✅ | ✅ | ✅ | ✅¹ |
 | modelOverride / effortOverride | ✅ | ✅ | ✅ | ⚠️³ |
 | **executionPolicies** | 三档 | 三档 | Read Only/Full Access | driver 声明 |
 | **sandboxBypassGuaranteed** | 仅 Full Access | 仅 Full Access | 仅 Full Access | ❌ |
@@ -44,6 +45,8 @@ packages/
 ¹ ACP 的 list 需要 agent 声明 `sessionCapabilities.list`；read 需要 `loadSession=true` 的历史回放。resume 优先使用 `session/load`，也支持稳定的 `sessionCapabilities.resume`；未声明时均显式返回 `unsupported`。² ACP cancel 仅作用于本插件创建并仍持有的 managed 活跃回合，不会尝试取消外部或空闲 session。³ model/effort 通过 session `configOptions` 的 `model` / `thought_level` 类别协商；agent 未提供对应选项或所请求值时显式 `unsupported`。
 
 `streaming 到 DSH` 一行仍是 ❌，指已验收的 DSH rc.6–`0.1.1-rc.2` 尚未消费第三方 provider 的增量。渠道层已经通过 `RunEnv.onUpdate` 产生 `text-delta`，DSH provider 返回值也附带一个向后兼容、可选且有界的 `updates: AsyncIterable`；宿主会忽略这个未知字段，最终 `result` 仍是唯一权威终态，中间增量不会写入父模型上下文。待 DSH 上游把可选 `SubagentRun.updates` 纳入 Service Definition 并增加 UI/远端 Consumer 后，才会把矩阵改为 ✅。
+
+`显式进度查询` 不等于把隐藏思维或完整流自动注入父模型上下文。插件把渠道公开的 assistant 文本增量合并成有界进度快照，并通过 `coding_run_read` 幂等读取；后台 Job 同时使用 DSH 正式 `readOutput()` 接口，让显式 `job_output` 读取自上次调用以来的新文本。若运行尚未产生增量但已绑定可读取的渠道 Session，`coding_run_read` 会临时读取有界 assistant 快照；该快照不写入运行注册表。没有可展示文本时返回 `not-yet`，不会把空输出误报成“无法查看进度”。
 
 > `sandboxBypassGuaranteed` 只描述 Full Access 路径的真实保证，不是默认策略或安全边界：
 > - **codex**：Full Access 才使用 CLI bypass 或 app-server `never`/`dangerFullAccess`；Read Only/Workspace Write 映射到官方审批与 sandbox profile。
@@ -85,7 +88,7 @@ packages/
 - **`coding_session_start`** — 必填 `channel` + `prompt`；可选 `model` / `reasoning_effort` / `cwd`，模型同样必须使用完整渠道 ID。
 - **`coding_session_send`** — 必填 `channel` + `session_id` + `prompt`；托管会话 active 时 steer，否则显式拒绝。
 - **`coding_session_cancel`** — 必填 `channel` + `session_id`；可选 `run_id` / `reason`。只取消当前插件进程拥有的 active turn，外部/空闲会话显式拒绝。
-- **`coding_runs_list` / `coding_run_read`** — 查看本插件创建的后台运行；不会保存原始 prompt。
+- **`coding_runs_list` / `coding_run_read`** — 查看本插件创建的后台运行；`coding_run_read` 是用户询问顾问/子 Agent 进度时的首选入口，返回有界进度、更新时间和中断原因，必要时使用只读 Session 快照兜底；不会保存原始 prompt。
 - **`coding_run_resume`** — 从有 sessionId 且当前通道仍支持 resume 的旧记录启动一个**新的**后台运行，并以 `resumedFrom` 关联。
 - **`coding_run_cancel`** — 只取消当前插件进程真实持有的 active run；重启前的记录会明确拒绝取消。
 
@@ -120,7 +123,7 @@ packages/
 
 ### 插件自有运行与重启
 
-插件创建的后台和显式前台运行都会先登记到 `<DSH_HOME>/dsh-subagent-code-agents/owned-runs.json`；也可用 `runRegistryPath` 指定位置。若两者都没有，则只在内存中登记。最多保留 100 条记录；只保存拥有者 ID、通道、角色、模型、强度、cwd、sessionId/turnId、状态、最多 16000 字符输出摘要、终态未知标记，以及终态通知的稳定消息 ID/摘要/投递状态；**不保存 prompt、密钥或登录态**。插件重启把未结算运行标为 `interrupted`，拥有者会话重新挂载后收到一次可去重回报，绝不冒充旧进程仍存活。
+插件创建的后台和显式前台运行都会先登记到 `<DSH_HOME>/dsh-subagent-code-agents/owned-runs.json`；也可用 `runRegistryPath` 指定位置。若两者都没有，则只在内存中登记。最多保留 100 条记录；只保存拥有者 ID、通道、角色、模型、强度、cwd、sessionId/turnId、状态、最多 16000 字符终态输出摘要、最多 4096 字符公开 assistant 进度尾部、终态未知标记，以及终态通知的稳定消息 ID/摘要/投递状态；**不保存 prompt、工具参数、隐藏思维、密钥或登录态**。高频进度在内存中合并并至多每秒持久化一次，绑定、终态和关闭时强制落盘。插件重启把未结算运行标为 `interrupted`，保留最后进度和诚实的 `process-restart-or-crash` / `plugin-disposed` 原因；拥有者会话重新挂载后收到一次可去重回报，绝不冒充旧进程仍存活。
 
 bundle 还注册 `dsh-code-agents` Skill，要求 Agent 对长期任务默认后台派发后结束当前轮，并在插件自动回报后再验收；前台等待和 `completion_delivery=manual` 只用于真正的同轮依赖或显式审计。
 
