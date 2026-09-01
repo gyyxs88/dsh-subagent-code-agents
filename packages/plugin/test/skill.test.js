@@ -13,6 +13,8 @@ test('bundled coding-agent skill teaches asynchronous auto-reporting', async () 
   assert.match(skill.content, /run_in_background=false/u)
   assert.match(skill.content, /completion_delivery/u)
   assert.match(skill.content, /不要持续调用 `job_output`/u)
+  assert.match(skill.content, /先用 `coding_run_read`/u)
+  assert.match(skill.content, /不要因为一次 `job_output` 返回空文本/u)
 })
 
 test('bundled coding-agent skill rejects malformed frontmatter', () => {

@@ -18,6 +18,8 @@ import { defaultRunRegistryPath, jobOutcomeFor, OwnedRunRegistry, sharedOwnedRun
 import { createRunNotifier } from './run-notifier.js'
 
 const JOB_NOTICE_CLAIM_WAIT_MS = 2_147_000_000
+const JOB_PROGRESS_LIMIT_CHARS = 65_536
+const JOB_OUTPUT_LIMIT_BYTES = 20_000
 
 export const name = 'tool-subagent-code-agents'
 export const inject = ['agents', 'sessions', 'tools', 'subagents']
@@ -61,7 +63,100 @@ function outputValueText(values) {
     .join('')
 }
 
-async function settleOwnedStart(start, signal, ownedRuns, runId, onSettled) {
+class ProgressOutputBuffer {
+  constructor(maxChars = JOB_PROGRESS_LIMIT_CHARS) {
+    this.maxChars = maxChars
+    this.pending = ''
+    this.observed = ''
+  }
+
+  push(update) {
+    const text = typeof update?.text === 'string' ? update.text : ''
+    if (!text) return
+    this.observed = `${this.observed}${text}`.slice(-this.maxChars)
+    this.pending = `${this.pending}${text}`.slice(-this.maxChars)
+  }
+
+  finish(finalText) {
+    if (typeof finalText !== 'string' || finalText.length === 0) return
+    if (this.observed.length === 0) return this.push({ text: finalText })
+    if (finalText === this.observed || this.observed.endsWith(finalText)) return
+    if (finalText.startsWith(this.observed)) return this.push({ text: finalText.slice(this.observed.length) })
+    this.push({ text: `\n[final]\n${finalText}` })
+  }
+
+  read() {
+    const text = this.pending
+    this.pending = ''
+    return text
+  }
+}
+
+function sessionProgressText(snapshot) {
+  if (typeof snapshot?.lastAssistantText === 'string' && snapshot.lastAssistantText.trim()) {
+    return snapshot.lastAssistantText.trim()
+  }
+  if (!Array.isArray(snapshot?.turns)) return undefined
+  for (let index = snapshot.turns.length - 1; index >= 0; index -= 1) {
+    const turn = snapshot.turns[index]
+    if (!turn || typeof turn !== 'object') continue
+    if (typeof turn.assistantText === 'string' && turn.assistantText.trim()) return turn.assistantText.trim()
+    if (turn.role === 'assistant' && typeof turn.text === 'string' && turn.text.trim()) return turn.text.trim()
+  }
+  return undefined
+}
+
+async function refreshRunProgress(view, channel) {
+  if (view?.progress?.availability === 'available' || !view?.sessionId) return view
+  if (!hasCapability(channel, 'readSession') || typeof channel.readSession !== 'function') return view
+  try {
+    const snapshot = await channel.readSession({ sessionId: view.sessionId, maxTurns: 5, maxChars: 8_192 })
+    const preview = sessionProgressText(snapshot)
+    return {
+      ...view,
+      progress: preview
+        ? {
+            revision: view.progress?.revision ?? 0,
+            phase: view.progress?.phase ?? (view.status === 'running' ? 'bound' : 'interrupted'),
+            availability: 'available',
+            preview: preview.slice(-4_096),
+            source: 'session-snapshot',
+            updatedAt: view.progress?.updatedAt ?? view.updatedAt,
+            truncated: preview.length > 4_096,
+            persisted: false,
+          }
+        : {
+            ...(view.progress ?? {
+              revision: 0,
+              phase: view.status === 'running' ? 'bound' : 'interrupted',
+              source: 'lifecycle',
+              updatedAt: view.updatedAt,
+              truncated: false,
+            }),
+            availability: 'not-yet',
+            persisted: false,
+          },
+    }
+  } catch (error) {
+    return {
+      ...view,
+      progress: {
+        ...(view.progress ?? {
+          revision: 0,
+          phase: view.status === 'running' ? 'bound' : 'interrupted',
+          source: 'lifecycle',
+          updatedAt: view.updatedAt,
+          truncated: false,
+        }),
+        availability: 'temporarily-unavailable',
+        refreshError: String(error?.message ?? error).slice(0, 500),
+        persisted: false,
+      },
+    }
+  }
+}
+
+async function settleOwnedStart(start, signal, ownedRuns, runId, progressOutput, onSettled) {
   const notify = async () => {
     try { await onSettled?.() } catch {}
   }
@@ -69,6 +164,7 @@ async function settleOwnedStart(start, signal, ownedRuns, runId, onSettled) {
   try {
     run = await start
     const result = await run.result
+    progressOutput?.finish(outputValueText(result?.output))
     try {
       await run.dispose()
     } catch (error) {
@@ -232,6 +328,11 @@ export const apply = (ctx, config = {}, injected = {}) => {
       resumedFrom,
     })
     const controller = new AbortController()
+    const progressOutput = new ProgressOutputBuffer()
+    const observeProgress = (update) => {
+      progressOutput.push(update)
+      ownedRuns.updateProgress(record.id, update)
+    }
     ownedRunIds.add(record.id)
     ownedRuns.attach(record.id, { controller })
     let jobId
@@ -240,18 +341,22 @@ export const apply = (ctx, config = {}, injected = {}) => {
         kind: 'subagent',
         label,
         owner,
+        outputLimitBytes: JOB_OUTPUT_LIMIT_BYTES,
         run: () => ({
           cancel: (reason) => controller.abort(reason ?? 'background subagent task killed'),
+          readOutput: () => progressOutput.read(),
           done: settleOwnedStart(
             subagents.start(providerName, {
               ...request,
               background: true,
               signal: controller.signal,
               onBinding: (binding) => ownedRuns.bind(record.id, binding),
+              onUpdate: observeProgress,
             }),
             controller.signal,
             ownedRuns,
             record.id,
+            progressOutput,
             () => runNotifier.request(record.id, owner),
           ),
         }),
@@ -290,6 +395,7 @@ export const apply = (ctx, config = {}, injected = {}) => {
       foreground: true,
     })
     const controller = new AbortController()
+    const observeProgress = (update) => ownedRuns.updateProgress(record.id, update)
     const abort = () => controller.abort(signal?.reason ?? 'foreground tool call aborted')
     if (signal?.aborted) abort()
     else signal?.addEventListener?.('abort', abort, { once: true })
@@ -302,6 +408,7 @@ export const apply = (ctx, config = {}, injected = {}) => {
         background: false,
         signal: controller.signal,
         onBinding: (binding) => ownedRuns.bind(record.id, binding),
+        onUpdate: observeProgress,
       })
       const result = await run.result
       await run.dispose()
@@ -313,7 +420,7 @@ export const apply = (ctx, config = {}, injected = {}) => {
       return { ...result, ownedRunId: record.id }
     } catch (error) {
       try { await run?.dispose?.() } catch {}
-      const current = ownedRuns.read(record.id)
+      const current = ownedRuns.readInternal(record.id)
       if (current?.status === 'running') ownedRuns.fail(record.id, error, controller.signal.aborted)
       throw error
     } finally {
@@ -625,14 +732,16 @@ export const apply = (ctx, config = {}, injected = {}) => {
         },
       },
       coding_run_read: {
-        description: 'Read one plugin-owned background run record. Prompts are intentionally never persisted.',
+        description: 'Read one plugin-owned background run and its latest bounded progress. Use this first when the user asks for a coding-agent or advisor progress update. Prompts are intentionally never persisted.',
         parameters: {
           run_id: { type: 'string', required: true, description: 'Owned run id returned by subagent_code.' },
         },
-        execute(args, exec) {
-          const record = ownedRuns.read(args.run_id, registry)
-          if (!record || record.ownerId !== exec.agent.id) throw new Error(`unknown owned run "${args.run_id}"`)
-          return record
+        async execute(args, exec) {
+          const internal = ownedRuns.readInternal(args.run_id)
+          if (!internal || internal.ownerId !== exec.agent.id) throw new Error(`unknown owned run "${args.run_id}"`)
+          const view = ownedRuns.read(args.run_id, registry)
+          const channel = registry.get(internal.channel)
+          return channel ? refreshRunProgress(view, channel) : view
         },
       },
       coding_run_resume: {
@@ -647,8 +756,9 @@ export const apply = (ctx, config = {}, injected = {}) => {
           completion_delivery: { type: 'string', enum: ['followup', 'manual'], description: 'Terminal report mode for the new background run; defaults to followup.' },
         },
         async execute(args, exec) {
+          const internal = ownedRuns.readInternal(args.run_id)
+          if (!internal || internal.ownerId !== exec.agent.id) throw new Error(`unknown owned run "${args.run_id}"`)
           const previous = ownedRuns.read(args.run_id, registry)
-          if (!previous || previous.ownerId !== exec.agent.id) throw new Error(`unknown owned run "${args.run_id}"`)
           if (previous.continuation !== 'resume_available') {
             return {
               accepted: false,
@@ -721,7 +831,7 @@ export const apply = (ctx, config = {}, injected = {}) => {
           reason: { type: 'string', description: 'Optional cancellation reason.' },
         },
         execute(args, exec) {
-          const record = ownedRuns.read(args.run_id)
+          const record = ownedRuns.readInternal(args.run_id)
           if (!record || record.ownerId !== exec.agent.id) throw new Error(`unknown owned run "${args.run_id}"`)
           return ownedRuns.cancel(args.run_id, args.reason)
         },

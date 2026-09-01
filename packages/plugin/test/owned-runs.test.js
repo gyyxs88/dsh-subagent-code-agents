@@ -3,6 +3,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
+import { isJsonValue } from '@deepseek-ai/dsh-session'
 
 import {
   OwnedRunRegistry,
@@ -62,6 +63,11 @@ test('settled run persists bounded metadata without the prompt', () => {
     assert.equal(view.jobId, 'job-1')
     assert.equal(view.turnId, 'turn-1')
     assert.equal(view.outcomeUnknown, true)
+    assert.equal(view.progress.phase, 'settled')
+    assert.equal(view.progress.source, 'final-output')
+    assert.equal(isJsonValue(view), true)
+    assert.equal(Object.hasOwn(view, 'ownerId'), false)
+    assert.equal(Object.hasOwn(view, 'notification'), false)
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }
@@ -77,6 +83,8 @@ test('restart turns running into interrupted and never claims process activity',
     assert.equal(view.status, 'interrupted')
     assert.equal(view.active, false)
     assert.equal(view.continuation, 'resume_available')
+    assert.equal(view.interruption.reason, 'process-restart-or-crash')
+    assert.equal(view.progress.phase, 'interrupted')
     const cancel = second.cancel('run-live')
     assert.equal(cancel.accepted, false)
     assert.match(cancel.reason, /not active in this process/)
@@ -109,6 +117,71 @@ test('active cancel aborts only the current process controller', () => {
   assert.equal(result.accepted, true)
   assert.equal(controller.signal.aborted, true)
   assert.equal(controller.signal.reason, 'stop now')
+})
+
+test('progress is bounded, persisted on settlement, and remains lossless JSON', () => {
+  const { dir, file } = tempRegistry()
+  try {
+    const owned = new OwnedRunRegistry({ filePath: file, idFactory: () => 'run-progress' })
+    const record = owned.create({ channel: 'codex', label: 'progress' })
+    owned.updateProgress(record.id, { type: 'text-delta', text: 'first update\n' })
+    owned.updateProgress(record.id, { type: 'text-delta', text: 'Z'.repeat(8_000) })
+    const active = owned.read(record.id, resumableChannels)
+    assert.equal(active.progress.phase, 'working')
+    assert.equal(active.progress.availability, 'available')
+    assert.equal(active.progress.preview.length, 4_096)
+    assert.equal(active.progress.truncated, true)
+    assert.equal(isJsonValue(active), true)
+    const listed = owned.list({ channelRegistry: resumableChannels })
+    assert.equal(listed.runs[0].progress.preview.length, 500)
+    assert.equal(isJsonValue(listed), true)
+    owned.settle(record.id, { stopReason: 'completed', output: [{ type: 'text', text: 'done' }] })
+    const reloaded = new OwnedRunRegistry({ filePath: file })
+    const settled = reloaded.read(record.id, resumableChannels)
+    assert.equal(settled.progress.phase, 'settled')
+    assert.equal(settled.progress.preview.length, 4_096)
+    assert.equal(isJsonValue(settled), true)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('v1 registry and notification with missing optional fields migrate without undefined output', () => {
+  const { dir, file } = tempRegistry()
+  try {
+    fs.writeFileSync(file, JSON.stringify({
+      version: 1,
+      runs: [{
+        id: 'run-v1',
+        channel: 'codex',
+        label: 'legacy',
+        ownerId: 'owner',
+        completionDelivery: 'followup',
+        status: 'settled',
+        createdAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:01:00.000Z',
+        notification: {
+          kind: 'terminal',
+          fingerprint: 'a'.repeat(64),
+          messageId: 'message-1',
+          state: 'delivered',
+          attempts: 1,
+          deliveredAt: '2026-01-01T00:01:00.000Z',
+        },
+      }],
+    }))
+    const owned = new OwnedRunRegistry({ filePath: file })
+    const internal = owned.readInternal('run-v1')
+    assert.equal(Object.hasOwn(internal.notification, 'lastError'), false)
+    const view = owned.read('run-v1', resumableChannels)
+    assert.equal(Object.hasOwn(view, 'notification'), false)
+    assert.equal(Object.hasOwn(view, 'ownerId'), false)
+    assert.equal(view.progress.availability, 'not-yet')
+    assert.equal(isJsonValue(view), true)
+    assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).version, 2)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 test('job outcome mapping keeps completed output and treats abort as killed', () => {
