@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import { Context } from '@deepseek-ai/cordis'
-import { isJsonValue } from '@deepseek-ai/dsh-session'
+import { isJsonValue } from '@deepseek-ai/dsh-util-values'
 import { registry } from '@dsh-subagent-code-agents/core'
 import {
   Config,
