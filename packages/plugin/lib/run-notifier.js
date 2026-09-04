@@ -14,6 +14,11 @@ function sha256(value) {
   return createHash('sha256').update(value, 'utf8').digest('hex')
 }
 
+function sessionEvents(session) {
+  if (typeof session?.snapshotEvents === 'function') return session.snapshotEvents()
+  return Array.isArray(session?.events) ? [...session.events] : []
+}
+
 function buildRunReport(record) {
   if (record?.completionDelivery !== 'followup') return undefined
   if (!['settled', 'interrupted'].includes(record.status)) return undefined
@@ -54,7 +59,7 @@ function messageSeen(agent, messageId) {
   if (typeof messageId !== 'string' || messageId.length === 0) return false
   if ([...(agent?.inbox?.nextTurn ?? []), ...(agent?.inbox?.nextStep ?? [])]
     .some((message) => message?.id === messageId)) return true
-  return (agent?.session?.events ?? []).some((event) => (
+  return sessionEvents(agent?.session).some((event) => (
     (event.type === 'user/message' && event.data?.id === messageId)
     || (event.type === 'agent/inbox/spliced'
       && (event.data?.inserted ?? []).some((message) => message?.id === messageId))

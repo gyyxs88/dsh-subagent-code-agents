@@ -36,6 +36,8 @@ const npm = isWin ? 'npm.cmd' : 'npm'
  * under sandboxes (status null). Derives the cli.js from the npm.cmd location.
  */
 function npmCli() {
+  const invoked = process.env.npm_execpath
+  if (invoked && path.isAbsolute(invoked) && fs.existsSync(invoked)) return [process.execPath, invoked]
   const probe = spawnSync(isWin ? 'npm.cmd' : 'npm', ['config', 'get', 'prefix'], { encoding: 'utf8' })
   let prefix
   if (probe.status === 0 && probe.stdout) {
