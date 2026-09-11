@@ -1,6 +1,6 @@
 # dsh-subagent-code-agents
 
-DeepSeek Harness（DSH）`0.1.0-rc.6` 至 `0.1.2-rc.1` 的多渠道编码代理子代理插件：内置 OpenAI Codex、Anthropic Claude Code、Grok Build，并可配置任意数量的 Agent Client Protocol（ACP）实例。它同时提供严格角色、插件自有后台运行登记、持久终态自动回报和诚实的重启后续跑语义；在 DSH `0.1.2` 上使用不可变会话事件快照确认回报去重。
+DeepSeek Harness（DSH）`0.1.0-rc.6` 至 `0.1.5-rc.2` 的多渠道编码代理子代理插件：内置 OpenAI Codex、Anthropic Claude Code、Grok Build，并可配置任意数量的 Agent Client Protocol（ACP）实例。它同时提供严格角色、插件自有后台运行登记、持久终态自动回报和诚实的重启后续跑语义；在 DSH `0.1.2` 上使用不可变会话事件快照确认回报去重。
 
 ## 远程项目与运行时部署
 
@@ -44,7 +44,7 @@ packages/
 
 ¹ ACP 的 list 需要 agent 声明 `sessionCapabilities.list`；read 需要 `loadSession=true` 的历史回放。resume 优先使用 `session/load`，也支持稳定的 `sessionCapabilities.resume`；未声明时均显式返回 `unsupported`。² ACP cancel 仅作用于本插件创建并仍持有的 managed 活跃回合，不会尝试取消外部或空闲 session。³ model/effort 通过 session `configOptions` 的 `model` / `thought_level` 类别协商；agent 未提供对应选项或所请求值时显式 `unsupported`。
 
-`streaming 到 DSH` 一行仍是 ❌，指已验收的 DSH rc.6–`0.1.2-rc.1` 尚未消费第三方 provider 的增量。渠道层已经通过 `RunEnv.onUpdate` 产生 `text-delta`，DSH provider 返回值也附带一个向后兼容、可选且有界的 `updates: AsyncIterable`；宿主会忽略这个未知字段，最终 `result` 仍是唯一权威终态，中间增量不会写入父模型上下文。待 DSH 上游把可选 `SubagentRun.updates` 纳入 Service Definition 并增加 UI/远端 Consumer 后，才会把矩阵改为 ✅。
+`streaming 到 DSH` 一行仍是 ❌，指已验收的 DSH rc.6–`0.1.5-rc.2` 尚未消费第三方 provider 的增量。渠道层已经通过 `RunEnv.onUpdate` 产生 `text-delta`，DSH provider 返回值也附带一个向后兼容、可选且有界的 `updates: AsyncIterable`；宿主会忽略这个未知字段，最终 `result` 仍是唯一权威终态，中间增量不会写入父模型上下文。待 DSH 上游把可选 `SubagentRun.updates` 纳入 Service Definition 并增加 UI/远端 Consumer 后，才会把矩阵改为 ✅。
 
 `显式进度查询` 不等于把隐藏思维或完整流自动注入父模型上下文。插件把渠道公开的 assistant 文本增量合并成有界进度快照，并通过 `coding_run_read` 幂等读取；后台 Job 同时使用 DSH 正式 `readOutput()` 接口，让显式 `job_output` 读取自上次调用以来的新文本。若运行尚未产生增量但已绑定可读取的渠道 Session，`coding_run_read` 会临时读取有界 assistant 快照；该快照不写入运行注册表。没有可展示文本时返回 `not-yet`，不会把空输出误报成“无法查看进度”。
 
