@@ -12,3 +12,7 @@
 - **模式挂载**：bundle 默认把工具自动挂到所有 Agent preset，唯独排除 `minimal`；已有手工工具行会被识别并保留
 - **Skill**：bundle 注册 `dsh-code-agents`；`subagent_code` 默认后台，行动顾问固定使用只读、仅后台 `action-advisor` 角色，完成时由插件自动回报；询问进度时先用 `coding_run_read`，不根据一次空 `job_output` 误判无进度，也不持续轮询
 - 与旧 `dsh-subagent-codex` 插件可共存（provider 命名不同）
+
+## 官方优先策略
+
+本插件只补充官方当前缺失的渠道、外部会话续接、持久运行回报和严格角色能力。普通 DSH 子代理及已安装官方后端可满足的一次性任务优先走官方工具；不替换官方工具名、权限或 Job 生命周期，也不在结果不确定时自动换入口重发。使用边界随包内 dsh-code-agents Skill 一起交付。
