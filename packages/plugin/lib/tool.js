@@ -435,7 +435,7 @@ export const apply = (ctx, config = {}, injected = {}) => {
         defineTool({
           name: 'subagent_code',
           description:
-            'Delegate a self-contained coding task to a registered coding-agent channel. Supply channel directly, or a configured role that fixes the channel and may provide model/effort/instructions. Explicit model/reasoning_effort override role defaults; a role/channel mismatch is rejected.' +
+            'Supplement official DSH delegation only when the task needs external session resume/steer, durable owned-run reporting, Grok Build, per-call model/effort, or a configured strict role. Prefer an available official subagent tool for ordinary one-shot work when its permissions and capabilities match. Never dispatch the same task through both paths. Supply channel directly, or a configured role that fixes the channel and may provide model/effort/instructions. Explicit model/reasoning_effort override role defaults; a role/channel mismatch is rejected.' +
             (backgroundEnabled
               ? ' Runs in the background by default: the call returns immediately and a durable terminal report automatically wakes the owner. Set run_in_background=false only for an explicit same-turn dependency; use job_output only for explicit inspection.'
               : ' The call waits for the result.'),

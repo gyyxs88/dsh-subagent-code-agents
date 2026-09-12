@@ -324,3 +324,7 @@ remote-control 的 channel manifest 消费测试也可使用 `DSH_SUBAGENT_CODE_
 ## License
 
 MIT
+
+## 官方优先策略
+
+本插件只补充官方当前缺失的渠道、外部会话续接、持久运行回报和严格角色能力。普通 DSH 子代理及已安装官方后端可满足的一次性任务优先走官方工具；不替换官方工具名、权限或 Job 生命周期，也不在结果不确定时自动换入口重发。使用边界随包内 dsh-code-agents Skill 一起交付。
